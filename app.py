@@ -7,17 +7,32 @@ import time
 from threading import Thread
 import re
 from groq import Groq
+import sys
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # ===== UPDATE THESE VALUES =====
 EMAIL = "24f2005903@ds.study.iitm.ac.in"
 SECRET = "my_secret_key_12345"  # Change this to something unique!
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")  # FREE from Groq
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 # ================================
 
-# Initialize Groq client (FREE & FAST)
-groq_client = Groq(api_key=GROQ_API_KEY)
+# Initialize Groq client
+try:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    logger.info("Groq client initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize Groq client: {e}")
+    groq_client = None
 
 def fetch_page_content(url):
     """Fetch page content with requests"""
@@ -32,28 +47,34 @@ def fetch_page_content(url):
             "success": True
         }
     except Exception as e:
+        logger.error(f"Failed to fetch {url}: {e}")
         return {
             "content": "",
             "success": False,
             "error": str(e)
         }
 
-def download_file(url):
-    """Download file and return base64"""
-    try:
-        response = requests.get(url, timeout=60)
-        response.raise_for_status()
-        return base64.b64encode(response.content).decode('utf-8')
-    except Exception as e:
-        print(f"Error downloading {url}: {e}")
-        return None
+def decode_base64_in_page(html_content):
+    """Extract and decode base64 content from page"""
+    match = re.search(r'atob\([`\'"]([^`\'"]+)[`\'"]', html_content)
+    if match:
+        try:
+            decoded = base64.b64decode(match.group(1)).decode('utf-8')
+            return decoded
+        except:
+            pass
+    return html_content
 
 def solve_with_groq(page_content, quiz_url, previous_attempts=None):
-    """Use Groq (FREE & FAST) to understand and solve the quiz"""
+    """Use Groq to solve the quiz"""
+    
+    if not groq_client:
+        logger.error("Groq client not initialized!")
+        return None
     
     context = ""
     if previous_attempts:
-        context = f"\nPrevious attempts and feedback:\n{json.dumps(previous_attempts, indent=2)}\n"
+        context = f"\nPrevious attempts:\n{json.dumps(previous_attempts, indent=2)}\n"
     
     prompt = f"""You are solving a data analysis quiz. Analyze this page and solve the task.
 
@@ -65,49 +86,41 @@ PAGE CONTENT:
 {context}
 
 Instructions:
-1. Read the page carefully - it may contain base64 encoded content that needs decoding
-2. Identify what task needs to be done (download file, analyze data, create visualization, etc.)
+1. Read the page - it may have base64 encoded content that needs decoding
+2. Identify the task (download file, analyze data, create visualization, etc.)
 3. Note any URLs for files to download or APIs to call
 4. Determine the submit URL where the answer should be posted
 5. Calculate/generate the correct answer
-6. Format the answer exactly as requested (number, string, boolean, object, or base64)
+6. Format answer exactly as requested (number, string, boolean, object, or base64)
 
-Respond with ONLY a valid JSON object (no markdown, no explanation):
+Respond with ONLY valid JSON (no markdown):
 {{
   "task": "brief description",
   "submit_url": "URL to POST answer",
-  "file_urls": ["url1", "url2"] or [],
+  "file_urls": ["url1"] or [],
   "answer": <actual answer>,
-  "reasoning": "brief explanation of your answer"
+  "reasoning": "brief explanation"
 }}
 
 CRITICAL: 
-- If page has base64 content in <script> tags, decode it first
-- Answer must match the expected type exactly
-- Numbers should be numbers, not strings
-- Include the full submit URL
-- Do not include markdown code blocks in your response"""
+- Decode base64 content in <script> tags first
+- Answer type must match exactly (number vs string)
+- Include full submit URL"""
 
     try:
         chat_completion = groq_client.chat.completions.create(
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a data analysis expert. Always respond with valid JSON only, no markdown."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
+                {"role": "system", "content": "You are a data analysis expert. Respond with valid JSON only."},
+                {"role": "user", "content": prompt}
             ],
-            model="llama-3.3-70b-versatile",  # Fast and smart
+            model="llama-3.3-70b-versatile",
             temperature=0.1,
             max_tokens=4096,
         )
         
         response_text = chat_completion.choices[0].message.content.strip()
         
-        # Clean up markdown if present
+        # Clean markdown
         if "```json" in response_text:
             response_text = response_text.split("```json")[1].split("```")[0].strip()
         elif "```" in response_text:
@@ -117,77 +130,58 @@ CRITICAL:
         return result
         
     except Exception as e:
-        print(f"Groq error: {e}")
-        print(f"Response was: {response_text if 'response_text' in locals() else 'no response'}")
+        logger.error(f"Groq error: {e}")
         return None
-
-def decode_base64_in_page(html_content):
-    """Extract and decode base64 content from page"""
-    # Look for atob() calls
-    match = re.search(r'atob\([`\'"]([^`\'"]+)[`\'"]', html_content)
-    if match:
-        try:
-            decoded = base64.b64decode(match.group(1)).decode('utf-8')
-            return decoded
-        except:
-            pass
-    return html_content
 
 def process_quiz(start_url):
     """Process the quiz chain"""
+    logger.info(f"{'#'*60}")
+    logger.info(f"STARTING QUIZ: {start_url}")
+    logger.info(f"{'#'*60}")
+    
     current_url = start_url
     max_questions = 15
     question_count = 0
     results = []
     start_time = time.time()
-    MAX_TIME = 170  # 2 minutes 50 seconds
+    MAX_TIME = 170
     
     while current_url and question_count < max_questions:
         if time.time() - start_time > MAX_TIME:
-            print("Time limit approaching, stopping")
+            logger.warning("Time limit approaching, stopping")
             break
             
         question_count += 1
-        print(f"\n{'='*60}")
-        print(f"Question {question_count}: {current_url}")
-        print(f"{'='*60}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Question {question_count}: {current_url}")
+        logger.info(f"{'='*60}")
         
         # Fetch page
         page_data = fetch_page_content(current_url)
         if not page_data['success']:
-            print(f"Failed to fetch: {page_data.get('error')}")
+            logger.error(f"Failed to fetch: {page_data.get('error')}")
             break
         
-        # Decode any base64 content
+        # Decode base64 content
         content = decode_base64_in_page(page_data['content'])
-        print(f"Page content preview: {content[:500]}...")
+        logger.info(f"Page preview: {content[:300]}...")
         
         # Solve with Groq
         previous_attempts = results[-1:] if results else None
         solution = solve_with_groq(content, current_url, previous_attempts)
         
         if not solution:
-            print("Failed to get solution")
+            logger.error("Failed to get solution")
             break
         
-        print(f"\nTask: {solution.get('task')}")
-        print(f"Answer: {solution.get('answer')}")
-        print(f"Reasoning: {solution.get('reasoning')}")
-        
-        # Download files if needed
-        downloaded_files = {}
-        if solution.get('file_urls'):
-            for file_url in solution['file_urls']:
-                if file_url:
-                    print(f"Downloading: {file_url}")
-                    file_data = download_file(file_url)
-                    if file_data:
-                        downloaded_files[file_url] = file_data
+        logger.info(f"Task: {solution.get('task')}")
+        logger.info(f"Answer: {solution.get('answer')}")
+        logger.info(f"Reasoning: {solution.get('reasoning')}")
         
         # Submit answer
         submit_url = solution.get('submit_url')
         if not submit_url:
-            print("No submit URL found!")
+            logger.error("No submit URL found!")
             break
         
         payload = {
@@ -197,13 +191,14 @@ def process_quiz(start_url):
             "answer": solution['answer']
         }
         
-        print(f"\nSubmitting to: {submit_url}")
+        logger.info(f"Submitting to: {submit_url}")
+        logger.info(f"Payload: {json.dumps(payload)}")
         
         try:
             response = requests.post(submit_url, json=payload, timeout=30)
             response_data = response.json()
             
-            print(f"Response: {response_data}")
+            logger.info(f"Response: {response_data}")
             
             correct = response_data.get('correct', False)
             reason = response_data.get('reason', '')
@@ -217,32 +212,32 @@ def process_quiz(start_url):
             })
             
             if correct:
-                print("✓ CORRECT!")
+                logger.info("✓ CORRECT!")
                 next_url = response_data.get('url')
                 if next_url:
                     current_url = next_url
                     time.sleep(0.5)
                 else:
-                    print("\n🎉 Quiz completed!")
+                    logger.info("🎉 Quiz completed!")
                     break
             else:
-                print(f"✗ WRONG: {reason}")
-                # Check if there's a skip URL
+                logger.warning(f"✗ WRONG: {reason}")
                 next_url = response_data.get('url')
                 if next_url:
-                    print("Moving to next question...")
+                    logger.info("Moving to next question...")
                     current_url = next_url
                     time.sleep(0.5)
                 else:
                     break
                     
         except Exception as e:
-            print(f"Submit error: {e}")
+            logger.error(f"Submit error: {e}")
             break
     
-    print(f"\n{'='*60}")
-    print(f"Quiz session completed: {question_count} questions")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Quiz completed: {question_count} questions")
+    logger.info(f"Results: {json.dumps(results, indent=2)}")
+    logger.info(f"{'='*60}")
     
     return results
 
@@ -258,29 +253,26 @@ def quiz_endpoint():
     
     # Verify secret
     if data.get('secret') != SECRET:
+        logger.warning(f"Invalid secret attempt: {data.get('secret')}")
         return jsonify({"error": "Invalid secret"}), 403
     
     # Verify email
     if data.get('email') != EMAIL:
+        logger.warning(f"Invalid email: {data.get('email')}")
         return jsonify({"error": "Email mismatch"}), 403
     
     quiz_url = data.get('url')
     if not quiz_url:
         return jsonify({"error": "No URL provided"}), 400
     
-    print(f"\n{'#'*60}")
-    print(f"NEW QUIZ REQUEST: {quiz_url}")
-    print(f"{'#'*60}")
+    logger.info(f"Received quiz request for: {quiz_url}")
     
     # Process in background
     def async_quiz():
         try:
-            results = process_quiz(quiz_url)
-            print(f"\nFinal results:\n{json.dumps(results, indent=2)}")
+            process_quiz(quiz_url)
         except Exception as e:
-            print(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Quiz processing error: {e}", exc_info=True)
     
     thread = Thread(target=async_quiz, daemon=True)
     thread.start()
@@ -299,13 +291,14 @@ def test():
     return jsonify({
         "email": EMAIL,
         "secret_set": bool(SECRET),
-        "api_key_set": bool(GROQ_API_KEY)
+        "api_key_set": bool(GROQ_API_KEY),
+        "groq_client_ready": groq_client is not None
     }), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print(f"Starting server on port {port}...")
-    print(f"Email: {EMAIL}")
-    print(f"Secret configured: {bool(SECRET)}")
-    print(f"API key configured: {bool(GROQ_API_KEY)}")
+    logger.info(f"Starting server on port {port}")
+    logger.info(f"Email: {EMAIL}")
+    logger.info(f"Secret configured: {bool(SECRET)}")
+    logger.info(f"API key configured: {bool(GROQ_API_KEY)}")
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
