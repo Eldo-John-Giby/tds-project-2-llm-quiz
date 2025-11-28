@@ -13,7 +13,7 @@ app = Flask(__name__)
 # ===== UPDATE THESE VALUES =====
 EMAIL = "24f2005903@ds.study.iitm.ac.in"
 SECRET = "my_secret_key_12345"  # Change this to something unique!
-GROQ_API_KEY = os.environ.get("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", "")  # FREE from Groq
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")  # FREE from Groq
 # ================================
 
 # Initialize Groq client (FREE & FAST)
