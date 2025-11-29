@@ -11,6 +11,8 @@ import sys
 import logging
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
+import atexit
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # Configure logging
 logging.basicConfig(
@@ -24,7 +26,7 @@ app = Flask(__name__)
 
 # ===== UPDATE THESE VALUES =====
 EMAIL = "24f2005903@ds.study.iitm.ac.in"
-SECRET = "my_secret_key_12345"
+SECRET = "my_secret_key_12345"  # Change this to something unique!
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 # ================================
 
@@ -47,7 +49,7 @@ def fetch_page_content(url):
         return {
             "content": response.text,
             "success": True,
-            "url": response.url
+            "url": response.url  # Final URL after redirects
         }
     except Exception as e:
         logger.error(f"Failed to fetch {url}: {e}")
@@ -60,6 +62,7 @@ def fetch_page_content(url):
 def download_file(url, base_url=None):
     """Download a file and return its content"""
     try:
+        # Handle relative URLs
         if base_url and not url.startswith(('http://', 'https://')):
             url = urljoin(base_url, url)
         
@@ -72,6 +75,7 @@ def download_file(url, base_url=None):
         
         content_type = response.headers.get('content-type', '').lower()
         
+        # Text files (CSV, JSON, TXT, HTML)
         if any(t in content_type for t in ['text', 'csv', 'json', 'html', 'xml']):
             return {
                 "success": True,
@@ -81,6 +85,7 @@ def download_file(url, base_url=None):
                 "url": url
             }
         else:
+            # Binary files - return base64
             return {
                 "success": True,
                 "content": base64.b64encode(response.content).decode('utf-8'),
@@ -102,24 +107,27 @@ def extract_links_from_html(html_content, base_url):
         soup = BeautifulSoup(html_content, 'html.parser')
         links = []
         
+        # Find all <a> tags with href
         for a in soup.find_all('a', href=True):
             href = a['href']
             if not href.startswith(('javascript:', 'mailto:', '#')):
                 absolute_url = urljoin(base_url, href)
                 links.append(absolute_url)
         
+        # Find all <link> tags (stylesheets, etc)
         for link in soup.find_all('link', href=True):
             href = link['href']
             absolute_url = urljoin(base_url, href)
             links.append(absolute_url)
         
+        # Find all <script> and <img> src
         for tag in soup.find_all(['script', 'img', 'audio', 'video'], src=True):
             src = tag['src']
             if not src.startswith(('javascript:', 'data:')):
                 absolute_url = urljoin(base_url, src)
                 links.append(absolute_url)
         
-        return list(set(links))
+        return list(set(links))  # Remove duplicates
     except Exception as e:
         logger.error(f"Error extracting links: {e}")
         return []
@@ -136,12 +144,13 @@ def decode_base64_in_page(html_content):
     return html_content
 
 def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_attempts=None):
-    """Use Groq to solve the quiz"""
+    """Use Groq to solve the quiz with enhanced context"""
     
     if not groq_client:
         logger.error("Groq client not initialized!")
         return None
     
+    # Build context with downloaded files
     files_context = ""
     if downloaded_files:
         files_context = "\n\nDOWNLOADED/SCRAPED DATA:\n"
@@ -149,6 +158,7 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
             if file_data.get('success'):
                 if file_data.get('type') == 'text':
                     content = file_data.get('content', '')
+                    # Truncate if too long
                     if len(content) > 8000:
                         content = content[:8000] + "\n...(truncated)"
                     files_context += f"\n=== From URL: {url} ===\n{content}\n================\n"
@@ -157,9 +167,9 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
     
     context = ""
     if previous_attempts:
-        context = f"\nPREVIOUS WRONG ATTEMPTS:\n{json.dumps(previous_attempts[-2:], indent=2)}\nLEARN FROM MISTAKES!\n"
+        context = f"\nPREVIOUS WRONG ATTEMPTS:\n{json.dumps(previous_attempts[-2:], indent=2)}\nLEARN FROM MISTAKES - don't repeat them!\n"
     
-    prompt = f"""You are solving a data analysis quiz. Find the EXACT answer from the data.
+    prompt = f"""You are solving a data analysis quiz. You must find the EXACT answer from the data provided.
 
 QUIZ URL: {quiz_url}
 
@@ -171,24 +181,32 @@ PAGE CONTENT:
 {context}
 
 INSTRUCTIONS:
-1. DECODE base64 content (look for atob)
-2. Read the EXACT question
-3. List files/URLs needed
-4. USE downloaded data to calculate answer
-5. For CSV: parse ALL rows, extract numbers, calculate (sum/avg/count)
-6. For scraping: find ACTUAL values in HTML tags (not placeholders)
-7. Construct submit URL
+1. DECODE any base64 content first (look for atob() in scripts)
+2. Read the EXACT question being asked
+3. If you need files or URLs, list them in file_urls and scrape_urls
+4. If you already have downloaded data above, USE IT to calculate the answer
+5. For CSV data: parse it carefully and do the exact calculation asked
+6. For scraping tasks: look for the ACTUAL data in the scraped content (not placeholders)
+7. Construct the submit URL from the page content
 
-Respond ONLY with valid JSON:
-{{"task": "exact question", "submit_url": "full URL", "file_urls": ["file"], "scrape_urls": ["url"], "answer": <answer>, "reasoning": "step-by-step"}}
+Respond with ONLY valid JSON:
+{{
+  "task": "exact question being asked",
+  "submit_url": "full URL to POST to",
+  "file_urls": ["file_to_download"] or [],
+  "scrape_urls": ["page_to_scrape"] or [],
+  "answer": <EXACT answer in correct type>,
+  "reasoning": "step-by-step calculation"
+}}
 
 CRITICAL RULES:
-- sum = add ALL numbers (not pick one)
-- secret code = find ACTUAL value in scraped HTML (in span/div/p tags, not placeholder)
-- CSV: parse EVERY row and calculate
-- Placeholders like "your secret" are NOT answers
-- If scraped page has <span id="code">XYZ</span>, answer is "XYZ" not "your secret"
-- Answer TYPE: sum=INTEGER, code=STRING, yes/no=BOOLEAN"""
+- If question asks for "sum", calculate SUM of all numbers
+- If question asks for "secret code", find the ACTUAL code value in scraped data (not the placeholder "your secret")
+- If you see scraped HTML, parse it to find the actual data values
+- CSV files: read ALL rows and do the calculation asked
+- Answer TYPE matters: sum=NUMBER, code=STRING, yes/no=BOOLEAN
+- Look for <span> tags or similar that contain actual values
+- Placeholder text like "your secret" or "anything you want" is NOT the answer unless explicitly stated
 
     try:
         chat_completion = groq_client.chat.completions.create(
@@ -203,6 +221,7 @@ CRITICAL RULES:
         
         response_text = chat_completion.choices[0].message.content.strip()
         
+        # Clean markdown
         if "```json" in response_text:
             response_text = response_text.split("```json")[1].split("```")[0].strip()
         elif "```" in response_text:
@@ -213,10 +232,11 @@ CRITICAL RULES:
         
     except Exception as e:
         logger.error(f"Groq error: {e}")
+        logger.error(f"Response: {response_text if 'response_text' in locals() else 'N/A'}")
         return None
 
 def process_quiz(start_url):
-    """Process the quiz chain"""
+    """Process the quiz chain with file downloading and scraping"""
     logger.info(f"{'#'*60}")
     logger.info(f"STARTING QUIZ: {start_url}")
     logger.info(f"{'#'*60}")
@@ -226,7 +246,7 @@ def process_quiz(start_url):
     question_count = 0
     results = []
     start_time = time.time()
-    MAX_TIME = 170
+    MAX_TIME = 170  # 2 min 50 sec
     
     while current_url and question_count < max_questions:
         if time.time() - start_time > MAX_TIME:
@@ -238,26 +258,32 @@ def process_quiz(start_url):
         logger.info(f"Question {question_count}: {current_url}")
         logger.info(f"{'='*60}")
         
+        # Fetch page
         page_data = fetch_page_content(current_url)
         if not page_data['success']:
             logger.error(f"Failed to fetch: {page_data.get('error')}")
             break
         
         actual_url = page_data.get('url', current_url)
+        
+        # Decode base64 content
         content = decode_base64_in_page(page_data['content'])
         logger.info(f"Page preview: {content[:400]}...")
         
+        # Extract all links from page
         all_links = extract_links_from_html(content, actual_url)
-        logger.info(f"Found {len(all_links)} links")
+        logger.info(f"Found {len(all_links)} links in page")
         
+        # First pass: ask LLM what it needs
         solution = solve_with_groq(content, actual_url, None, results)
         
         if not solution:
-            logger.error("Failed to get solution")
+            logger.error("Failed to get initial solution")
             break
         
         logger.info(f"Task: {solution.get('task')}")
         
+        # Download files mentioned by LLM
         downloaded_files = {}
         file_urls = solution.get('file_urls', [])
         
@@ -268,9 +294,11 @@ def process_quiz(start_url):
                     downloaded_files[file_url] = file_data
                     logger.info(f"✓ Downloaded: {file_url}")
         
+        # Scrape additional URLs mentioned
         scrape_urls = solution.get('scrape_urls', [])
         for scrape_url in scrape_urls:
             if scrape_url:
+                # Make absolute
                 if not scrape_url.startswith(('http://', 'https://')):
                     scrape_url = urljoin(actual_url, scrape_url)
                 
@@ -285,6 +313,7 @@ def process_quiz(start_url):
                     }
                     logger.info(f"✓ Scraped: {scrape_url}")
         
+        # Second pass: solve with all downloaded data
         if downloaded_files:
             logger.info(f"Re-solving with {len(downloaded_files)} resources")
             solution = solve_with_groq(content, actual_url, downloaded_files, results)
@@ -297,11 +326,13 @@ def process_quiz(start_url):
         logger.info(f"Answer: {answer} (type: {type(answer).__name__})")
         logger.info(f"Reasoning: {solution.get('reasoning')}")
         
+        # Get submit URL
         submit_url = solution.get('submit_url')
         if not submit_url:
             logger.error("No submit URL!")
             break
         
+        # Make absolute
         if not submit_url.startswith(('http://', 'https://')):
             submit_url = urljoin(actual_url, submit_url)
         
@@ -338,17 +369,17 @@ def process_quiz(start_url):
                     current_url = next_url
                     time.sleep(0.5)
                 else:
-                    logger.info("🎉 Quiz completed!")
+                    logger.info("🎉 Quiz completed successfully!")
                     break
             else:
                 logger.warning(f"✗ WRONG: {reason}")
                 next_url = response_data.get('url')
                 if next_url:
-                    logger.info("Moving to next...")
+                    logger.info("Moving to next question...")
                     current_url = next_url
                     time.sleep(0.5)
                 else:
-                    logger.warning("No next URL")
+                    logger.warning("No next URL, ending")
                     break
                     
         except Exception as e:
@@ -367,22 +398,25 @@ def process_quiz(start_url):
 @app.route('/', methods=['POST'])
 def quiz_endpoint():
     """Main endpoint"""
+    
     try:
         data = request.get_json(force=True)
     except:
         return jsonify({"error": "Invalid JSON"}), 400
     
     if data.get('secret') != SECRET:
+        logger.warning(f"Invalid secret: {data.get('secret')}")
         return jsonify({"error": "Invalid secret"}), 403
     
     if data.get('email') != EMAIL:
+        logger.warning(f"Invalid email: {data.get('email')}")
         return jsonify({"error": "Email mismatch"}), 403
     
     quiz_url = data.get('url')
     if not quiz_url:
-        return jsonify({"error": "No URL"}), 400
+        return jsonify({"error": "No URL provided"}), 400
     
-    logger.info(f"✓ Received: {quiz_url}")
+    logger.info(f"✓ Received quiz request: {quiz_url}")
     
     def async_quiz():
         try:
@@ -393,7 +427,10 @@ def quiz_endpoint():
     thread = Thread(target=async_quiz, daemon=True)
     thread.start()
     
-    return jsonify({"status": "accepted", "message": "Processing quiz"}), 200
+    return jsonify({
+        "status": "accepted",
+        "message": "Processing quiz"
+    }), 200
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -408,9 +445,29 @@ def test():
         "groq_ready": groq_client is not None
     }), 200
 
+# Keep-alive function
+def keep_alive():
+    """Ping self to prevent sleeping"""
+    try:
+        # Get the Render URL from environment or use localhost
+        base_url = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:8080')
+        requests.get(f"{base_url}/health", timeout=10)
+        logger.info("Keep-alive ping sent")
+    except Exception as e:
+        logger.error(f"Keep-alive failed: {e}")
+
+# Set up scheduler for keep-alive
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=keep_alive, trigger="interval", minutes=10)
+scheduler.start()
+
+# Shut down the scheduler when exiting
+atexit.register(lambda: scheduler.shutdown())
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     logger.info(f"Server starting on port {port}")
     logger.info(f"Email: {EMAIL}")
+    logger.info(f"Secret: {'*' * len(SECRET)}")
     logger.info(f"Groq API: {'configured' if GROQ_API_KEY else 'MISSING'}")
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
