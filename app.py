@@ -151,7 +151,7 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
     # Build context with downloaded files
     files_context = ""
     if downloaded_files:
-        files_context = "\n\nDOWNLOADED FILES:\n"
+        files_context = "\n\nDOWNLOADED/SCRAPED DATA:\n"
         for url, file_data in downloaded_files.items():
             if file_data.get('success'):
                 if file_data.get('type') == 'text':
@@ -159,15 +159,15 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
                     # Truncate if too long
                     if len(content) > 8000:
                         content = content[:8000] + "\n...(truncated)"
-                    files_context += f"\nFile: {url}\nContent:\n{content}\n---\n"
+                    files_context += f"\n=== From URL: {url} ===\n{content}\n================\n"
                 else:
                     files_context += f"\nFile: {url}\nType: Binary ({file_data.get('content_type')})\n"
     
     context = ""
     if previous_attempts:
-        context = f"\nPrevious attempts:\n{json.dumps(previous_attempts[-2:], indent=2)}\n"
+        context = f"\nPREVIOUS WRONG ATTEMPTS:\n{json.dumps(previous_attempts[-2:], indent=2)}\nLEARN FROM MISTAKES - don't repeat them!\n"
     
-    prompt = f"""You are solving a data analysis quiz. Analyze this page and solve the task.
+    prompt = f"""You are solving a data analysis quiz. You must find the EXACT answer from the data provided.
 
 QUIZ URL: {quiz_url}
 
@@ -178,33 +178,33 @@ PAGE CONTENT:
 
 {context}
 
-Instructions:
-1. Read the page - it may have base64 encoded content (decode it first!)
-2. Identify the exact task being asked
-3. List any file URLs that need downloading (CSV, PDF, images, etc.)
-4. List any page URLs that need scraping for data
-5. Use downloaded file content to calculate the answer
-6. Determine the exact submit URL (construct from page if needed)
-7. Provide the answer in the EXACT format requested
+INSTRUCTIONS:
+1. DECODE any base64 content first (look for atob() in scripts)
+2. Read the EXACT question being asked
+3. If you need files or URLs, list them in file_urls and scrape_urls
+4. If you already have downloaded data above, USE IT to calculate the answer
+5. For CSV data: parse it carefully and do the exact calculation asked
+6. For scraping tasks: look for the ACTUAL data in the scraped content (not placeholders)
+7. Construct the submit URL from the page content
 
-Respond with ONLY valid JSON (no markdown, no extra text):
+Respond with ONLY valid JSON:
 {{
-  "task": "clear description of what's being asked",
-  "submit_url": "full URL to POST answer to",
-  "file_urls": ["url1", "url2"] or [],
-  "scrape_urls": ["url_to_scrape"] or [],
-  "answer": <actual answer in correct type>,
-  "reasoning": "step-by-step how you got the answer"
+  "task": "exact question being asked",
+  "submit_url": "full URL to POST to",
+  "file_urls": ["file_to_download"] or [],
+  "scrape_urls": ["page_to_scrape"] or [],
+  "answer": <EXACT answer in correct type>,
+  "reasoning": "step-by-step calculation"
 }}
 
 CRITICAL RULES:
-- If the page has atob() with base64, DECODE IT FIRST to see the real question
-- Answer must be correct TYPE: number vs "string" vs true/false vs {{"key": "value"}}
-- If question says "sum", provide a NUMBER not string
-- If question asks for text/name, provide a STRING
-- Construct submit_url from page content if not obvious (look for <span class="origin">)
-- Use ALL available data from downloaded files to calculate answer
-- If you see relative URLs like "/demo-scrape-data", note them in scrape_urls"""
+- If question asks for "sum", calculate SUM of all numbers
+- If question asks for "secret code", find the ACTUAL code value in scraped data (not the placeholder "your secret")
+- If you see scraped HTML, parse it to find the actual data values
+- CSV files: read ALL rows and do the calculation asked
+- Answer TYPE matters: sum=NUMBER, code=STRING, yes/no=BOOLEAN
+- Look for <span> tags or similar that contain actual values
+- Placeholder text like "your secret" or "anything you want" is NOT the answer unless explicitly stated
 
     try:
         chat_completion = groq_client.chat.completions.create(
