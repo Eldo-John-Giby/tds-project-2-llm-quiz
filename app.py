@@ -48,7 +48,6 @@ def fetch_page_content(url):
 def fetch_and_parse_js_secret(page_url, page_content):
     """Try to extract secret by fetching and parsing JavaScript files"""
     try:
-        # Look for script tags
         soup = BeautifulSoup(page_content, 'html.parser')
         scripts = soup.find_all('script', src=True)
         
@@ -67,7 +66,6 @@ def fetch_and_parse_js_secret(page_url, page_content):
                 
                 logger.info(f"📄 JS content preview: {js_content[:500]}")
                 
-                # Check if this JS imports other files
                 import_matches = re.findall(r'import.*?from\s+["\']([^"\']+)["\']', js_content)
                 for import_file in import_matches:
                     if not import_file.startswith('http'):
@@ -81,13 +79,11 @@ def fetch_and_parse_js_secret(page_url, page_content):
                         imp_content = imp_response.text
                         logger.info(f"📄 Imported JS preview: {imp_content[:500]}")
                         
-                        # Parse the imported file for secrets
                         secrets = parse_js_for_secrets(imp_content)
                         all_secrets.extend(secrets)
                     except Exception as e:
                         logger.error(f"Failed to fetch import {import_url}: {e}")
                 
-                # Parse main JS file
                 secrets = parse_js_for_secrets(js_content)
                 all_secrets.extend(secrets)
                 
@@ -95,7 +91,6 @@ def fetch_and_parse_js_secret(page_url, page_content):
                 logger.error(f"Failed to fetch/parse JS: {e}")
                 continue
         
-        # Return the first valid secret found
         if all_secrets:
             secret = all_secrets[0]
             logger.info(f"✓ Found secret: {secret}")
@@ -111,17 +106,12 @@ def fetch_and_parse_js_secret(page_url, page_content):
 def compute_email_number(email):
     """Compute the emailNumber from an email address - converts email to a number"""
     try:
-        # The emailNumber function likely converts email to a number
-        # Common patterns: sum of ASCII values, hash mod something, extract numbers
-        
-        # Pattern 1: Extract all digits from email
         digits = ''.join(c for c in email if c.isdigit())
         if digits:
             number = int(digits)
             logger.info(f"📧 Email number (digits): {number}")
             return number
         
-        # Pattern 2: Sum ASCII values
         ascii_sum = sum(ord(c) for c in email)
         logger.info(f"📧 Email number (ASCII sum): {ascii_sum}")
         return ascii_sum
@@ -154,31 +144,26 @@ def download_file(url, base_url=None):
 def parse_csv_content(content, cutoff=None):
     """Parse CSV and extract all numeric data with statistics"""
     try:
-        # Try different delimiters
         for delimiter in [',', ';', '\t', '|']:
             try:
                 csv_reader = csv.reader(StringIO(content), delimiter=delimiter)
                 rows = list(csv_reader)
-                if len(rows) > 0 and len(rows[0]) > 1:  # Must have multiple columns
+                if len(rows) > 0 and len(rows[0]) > 1:
                     break
             except:
                 continue
         
-        # Extract all numbers
         all_numbers = []
         for row in rows:
             for cell in row:
                 cell = cell.strip()
-                # Try to convert to number
                 try:
-                    # Remove commas and convert
                     num = float(cell.replace(',', '').replace(' ', ''))
                     all_numbers.append(num)
                 except:
                     pass
         
         if all_numbers:
-            # Filter by cutoff if provided
             if cutoff is not None:
                 filtered_numbers = [n for n in all_numbers if n > cutoff]
                 logger.info(f"📊 Filtering numbers > {cutoff}: {len(all_numbers)} → {len(filtered_numbers)}")
@@ -205,7 +190,6 @@ def parse_js_for_secrets(js_content):
     """Parse JS content for potential secrets"""
     secrets = []
     
-    # Look for ALL possible patterns
     patterns = [
         r'textContent\s*=\s*["\']([^"\']+)["\']',
         r'innerHTML\s*=\s*["\']([^"\']+)["\']',
@@ -218,7 +202,6 @@ def parse_js_for_secrets(js_content):
     for pattern in patterns:
         matches = re.findall(pattern, js_content, re.IGNORECASE)
         for match in matches:
-            # Filter out common keywords
             if len(match) >= 5 and not any(kw in match.lower() for kw in ['question', 'email', 'submit', 'http', 'const', 'function', 'document', 'element', 'window', 'import', 'export', 'please', 'provide', 'secret', 'strong', 'utils']):
                 secrets.append(match)
     
@@ -229,33 +212,27 @@ def extract_values_from_html(content):
     try:
         soup = BeautifulSoup(content, 'html.parser')
         
-        # Remove script and style
         for tag in soup(["script", "style"]):
             tag.decompose()
         
         values = {}
         
-        # Extract from tags with IDs
         for tag in soup.find_all(id=True):
             tag_id = tag.get('id')
             text = tag.get_text().strip()
             if text and len(text) < 500:
                 values[f"#{tag_id}"] = text
         
-        # Extract from common semantic tags
         for tag_name in ['span', 'div', 'p', 'code', 'pre', 'strong', 'em']:
             for tag in soup.find_all(tag_name):
                 text = tag.get_text().strip()
-                # Look for potential codes/secrets (alphanumeric strings)
                 if text and len(text) < 200:
-                    # If it looks like a code (no spaces, mix of letters/numbers)
                     if text.replace('-', '').replace('_', '').isalnum() and len(text) > 3:
                         class_name = ' '.join(tag.get('class', []))
                         key = f"{tag_name}.{class_name}" if class_name else tag_name
                         if key not in values:
                             values[key] = text
         
-        # Get clean text
         text = soup.get_text()
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         clean_text = '\n'.join(lines)
@@ -271,11 +248,10 @@ def extract_values_from_html(content):
 
 def decode_base64_in_page(html_content):
     """Extract and decode base64 from page"""
-    # Look for base64 in various patterns
     patterns = [
-        r'atob\([`\'"]([^`\'"]+)[`\'"]',  # atob("...")
-        r'const code = `([A-Za-z0-9+/=]+)`',  # const code = `...`
-        r'code = ["\']([A-Za-z0-9+/=]+)["\']',  # code = "..."
+        r'atob\([`\'"]([^`\'"]+)[`\'"]',
+        r'const code = `([A-Za-z0-9+/=]+)`',
+        r'code = ["\']([A-Za-z0-9+/=]+)["\']',
     ]
     
     for pattern in patterns:
@@ -292,14 +268,13 @@ def decode_base64_in_page(html_content):
 
 def extract_origin_from_page(html_content, page_url):
     """Extract the origin (base URL) from page"""
-    # Parse the page URL to get origin
     parsed = urlparse(page_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     logger.info(f"Extracted origin: {origin}")
     return origin
 
-def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_attempts=None):
-    """Use Groq AI to solve the quiz"""
+def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_attempts=None, email_number=None):
+    """Use Groq AI to solve the quiz - FIXED: added email_number parameter"""
     if not groq_client:
         logger.error("Groq client not available!")
         return None
@@ -315,8 +290,8 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
             if data.get("type") == "text":
                 content = data.get("content", "")
                 
-                # Check if it's CSV
                 if 'csv' in url.lower() or 'csv' in data.get('content_type', '').lower():
+                    # NOW email_number is available as parameter
                     csv_data = parse_csv_content(content, cutoff=email_number)
                     if csv_data:
                         files_context += f"\n📊 CSV FILE: {url}\n"
@@ -332,7 +307,6 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
                     else:
                         files_context += f"\n📄 FILE: {url}\n{content[:1500]}\n"
                 
-                # Check if it's HTML
                 elif 'html' in data.get('content_type', '').lower() or '<html' in content.lower():
                     html_data = extract_values_from_html(content)
                     files_context += f"\n🌐 HTML PAGE: {url}\n"
@@ -432,7 +406,6 @@ PAGE CONTENT:
         
         text = response.choices[0].message.content.strip()
         
-        # Clean markdown
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
         elif "```" in text:
@@ -467,45 +440,40 @@ def process_quiz(start_url):
         logger.info(f"❓ Question {q+1}: {current_url}")
         logger.info(f"{'='*70}")
         
-        # Fetch page
         page = fetch_page_content(current_url)
         if not page['success']:
             logger.error(f"❌ Failed to fetch page")
             break
         
-        # Decode base64 and extract origin
         content = decode_base64_in_page(page['content'])
         origin = extract_origin_from_page(page['content'], page['url'])
         logger.info(f"🌐 Origin: {origin}")
         logger.info(f"📄 Page preview: {content[:250]}...")
         
-        # Get initial solution
-        solution = solve_with_groq(content, page['url'], None, results)
-        if not solution:
-            logger.error("❌ Failed to get solution")
-            break
-        
-        logger.info(f"📋 Task identified: {solution.get('task')}")
-        
-        # Fix submit URL - always use /submit endpoint at origin
-        submit_url_raw = solution.get("submit_url", "")
-        logger.info(f"🔗 Raw submit URL from AI: {submit_url_raw}")
-        
-        # The submit endpoint is always at the origin's /submit, not relative to current URL
-        submit_url = f"{origin}/submit"
-        logger.info(f"✓ Using submit URL: {submit_url}")
-        
-        # Download files and scrape URLs
-        downloaded = {}
+        # FIXED: Compute email_number BEFORE calling solve_with_groq
         email_number = None
-        
-        # Extract email from current URL if present
         if '?email=' in current_url:
             email_match = re.search(r'email=([^&]+)', current_url)
             if email_match:
                 user_email = email_match.group(1).replace('%40', '@')
                 email_number = compute_email_number(user_email)
                 logger.info(f"📧 Computed email number from {user_email}: {email_number}")
+        
+        # FIXED: Pass email_number to solve_with_groq
+        solution = solve_with_groq(content, page['url'], None, results, email_number)
+        if not solution:
+            logger.error("❌ Failed to get solution")
+            break
+        
+        logger.info(f"📋 Task identified: {solution.get('task')}")
+        
+        submit_url_raw = solution.get("submit_url", "")
+        logger.info(f"🔗 Raw submit URL from AI: {submit_url_raw}")
+        
+        submit_url = f"{origin}/submit"
+        logger.info(f"✓ Using submit URL: {submit_url}")
+        
+        downloaded = {}
         
         for file_url in solution.get("file_urls", []):
             if file_url:
@@ -524,16 +492,13 @@ def process_quiz(start_url):
                 if scraped["success"]:
                     scraped_content = decode_base64_in_page(scraped["content"])
                     
-                    # Try to extract secret from JavaScript files
                     js_secret = fetch_and_parse_js_secret(scrape_url, scraped["content"])
                     
-                    # If no secret found but we have email_number, use that as the secret
                     if not js_secret and email_number:
                         js_secret = str(email_number)
                         logger.info(f"✓ Using email_number as secret: {js_secret}")
                     
                     if js_secret:
-                        # Add the secret to the scraped content so AI can see it
                         scraped_content = f"SECRET FOUND: {js_secret}\n\n" + scraped_content
                     
                     downloaded[scrape_url] = {
@@ -546,30 +511,22 @@ def process_quiz(start_url):
                     logger.info(f"✓ Scraped: {scrape_url}")
                     logger.info(f"   Preview: {scraped_content[:500]}...")
         
-        # Re-solve with downloaded data
         if downloaded:
             logger.info(f"🔄 Re-analyzing with {len(downloaded)} resources...")
-            solution = solve_with_groq(content, page["url"], downloaded, results)
+            # FIXED: Pass email_number here too
+            solution = solve_with_groq(content, page["url"], downloaded, results, email_number)
             if not solution:
                 logger.error("❌ Failed with downloaded data")
                 break
-            
-            # Re-fix submit URL after re-solving
-            new_submit_url = solution.get("submit_url", "")
-            if new_submit_url and new_submit_url.startswith("http"):
-                submit_url = new_submit_url
-            # Otherwise keep the previously fixed submit_url
         
         answer = solution.get("answer")
         logger.info(f"💡 Answer: {answer} (type: {type(answer).__name__})")
         logger.info(f"🧠 Reasoning: {solution.get('reasoning')}")
         
-        # Verify submit URL one more time
         if not submit_url or not submit_url.startswith("http"):
             logger.error(f"❌ Invalid submit URL: {submit_url}")
             break
         
-        # Submit answer
         payload = {
             "email": EMAIL,
             "secret": SECRET,
@@ -582,13 +539,11 @@ def process_quiz(start_url):
         try:
             resp = requests.post(submit_url, json=payload, timeout=30)
             
-            # Check if response has content before parsing JSON
             if not resp.text.strip():
                 logger.warning(f"⚠️ Empty response from server (status: {resp.status_code})")
                 logger.warning(f"🛑 Cannot proceed without response data")
                 break
             
-            # Log raw response for debugging
             logger.info(f"📥 Raw response ({resp.status_code}): {resp.text[:500]}")
             
             try:
@@ -672,7 +627,6 @@ def quiz_endpoint():
     
     logger.info(f"✓ Received quiz request: {url}")
     
-    # Process in background
     Thread(target=lambda: process_quiz(url), daemon=True).start()
     
     return jsonify({"status": "accepted", "message": "Processing quiz"}), 200
