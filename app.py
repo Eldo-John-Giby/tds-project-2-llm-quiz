@@ -164,6 +164,14 @@ def decode_base64_in_page(html_content):
             pass
     return html_content
 
+def extract_origin_from_page(html_content, page_url):
+    """Extract the origin (base URL) from page"""
+    # Parse the page URL to get origin
+    parsed = urlparse(page_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    logger.info(f"Extracted origin: {origin}")
+    return origin
+
 def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_attempts=None):
     """Use Groq AI to solve the quiz"""
     if not groq_client:
@@ -250,10 +258,15 @@ PAGE CONTENT:
 - The answer is the VALUE after the colon (e.g., 'ABC123')
 - NEVER use placeholder text like "your secret"
 
+🔗 FOR SUBMIT URL:
+- If you see "<span class=\"origin\"></span>/submit", just return "/submit" as the submit_url
+- If you see a path like "/q1/submit" or "/demo/submit", return JUST THE PATH starting with /
+- I will add the correct domain automatically
+
 📝 RESPOND WITH ONLY THIS JSON:
 {{
   "task": "exact question from decoded content",
-  "submit_url": "full URL to POST answer to",
+  "submit_url": "/submit",
   "file_urls": ["file1.csv"],
   "scrape_urls": ["/path/to/scrape"],
   "answer": <use the pre-calculated values from above>,
@@ -264,6 +277,7 @@ PAGE CONTENT:
 - SUM questions: Use my pre-calculated "SUM OF ALL NUMBERS" value
 - SECRET questions: Use value from "EXTRACTED VALUES" (look for #id or tag names)
 - Answer TYPE: sum=INTEGER, secret=STRING, yes/no=BOOLEAN
+- submit_url: MUST start with / (like "/submit" or "/q1/submit"), NOT full URL
 - If you see "✓ SUM OF ALL NUMBERS: 4803134", answer is 4803134 (integer)
 - If you see "#secret: 'mycode123'", answer is "mycode123" (string)"""
 
@@ -327,8 +341,10 @@ def process_quiz(start_url):
             logger.error(f"❌ Failed to fetch page")
             break
         
-        # Decode base64
+        # Decode base64 and extract origin
         content = decode_base64_in_page(page['content'])
+        origin = extract_origin_from_page(page['content'], page['url'])
+        logger.info(f"🌐 Origin: {origin}")
         logger.info(f"📄 Page preview: {content[:250]}...")
         
         # Get initial solution
@@ -338,6 +354,14 @@ def process_quiz(start_url):
             break
         
         logger.info(f"📋 Task identified: {solution.get('task')}")
+        
+        # Fix submit URL - always use /submit endpoint at origin
+        submit_url_raw = solution.get("submit_url", "")
+        logger.info(f"🔗 Raw submit URL from AI: {submit_url_raw}")
+        
+        # The submit endpoint is always at the origin's /submit, not relative to current URL
+        submit_url = f"{origin}/submit"
+        logger.info(f"✓ Using submit URL: {submit_url}")
         
         # Download files and scrape URLs
         downloaded = {}
@@ -373,19 +397,21 @@ def process_quiz(start_url):
             if not solution:
                 logger.error("❌ Failed with downloaded data")
                 break
+            
+            # Re-fix submit URL after re-solving
+            new_submit_url = solution.get("submit_url", "")
+            if new_submit_url and new_submit_url.startswith("http"):
+                submit_url = new_submit_url
+            # Otherwise keep the previously fixed submit_url
         
         answer = solution.get("answer")
         logger.info(f"💡 Answer: {answer} (type: {type(answer).__name__})")
         logger.info(f"🧠 Reasoning: {solution.get('reasoning')}")
         
-        # Get submit URL
-        submit_url = solution.get("submit_url")
-        if not submit_url:
-            logger.error("❌ No submit URL!")
+        # Verify submit URL one more time
+        if not submit_url or not submit_url.startswith("http"):
+            logger.error(f"❌ Invalid submit URL: {submit_url}")
             break
-        
-        if not submit_url.startswith("http"):
-            submit_url = urljoin(page["url"], submit_url)
         
         # Submit answer
         payload = {
