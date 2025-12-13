@@ -9,8 +9,10 @@ import re
 from groq import Groq
 import sys
 import logging
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
+import csv
+from io import StringIO
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,9 +29,9 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 try:
     groq_client = Groq(api_key=GROQ_API_KEY)
-    logger.info("Groq client initialized successfully")
+    logger.info("✓ Groq client initialized")
 except Exception as e:
-    logger.error(f"Groq init failed: {e}")
+    logger.error(f"✗ Groq init failed: {e}")
     groq_client = None
 
 def fetch_page_content(url):
@@ -57,12 +59,98 @@ def download_file(url, base_url=None):
         content_type = response.headers.get('content-type', '').lower()
         
         if any(t in content_type for t in ['text', 'csv', 'json', 'html', 'xml']):
-            return {"success": True, "content": response.text, "type": "text", "url": url}
+            return {"success": True, "content": response.text, "type": "text", "url": url, "content_type": content_type}
         else:
-            return {"success": True, "content": base64.b64encode(response.content).decode(), "type": "binary", "url": url}
+            return {"success": True, "content": base64.b64encode(response.content).decode(), "type": "binary", "url": url, "content_type": content_type}
     except Exception as e:
         logger.error(f"Download failed: {e}")
         return {"success": False, "error": str(e), "url": url}
+
+def parse_csv_content(content):
+    """Parse CSV and extract all numeric data with statistics"""
+    try:
+        # Try different delimiters
+        for delimiter in [',', ';', '\t', '|']:
+            try:
+                csv_reader = csv.reader(StringIO(content), delimiter=delimiter)
+                rows = list(csv_reader)
+                if len(rows) > 0 and len(rows[0]) > 0:
+                    break
+            except:
+                continue
+        
+        # Extract all numbers
+        all_numbers = []
+        for row in rows:
+            for cell in row:
+                cell = cell.strip()
+                # Try to convert to number
+                try:
+                    num = float(cell.replace(',', ''))
+                    all_numbers.append(num)
+                except:
+                    pass
+        
+        if all_numbers:
+            return {
+                "numbers": all_numbers,
+                "count": len(all_numbers),
+                "sum": sum(all_numbers),
+                "min": min(all_numbers),
+                "max": max(all_numbers),
+                "avg": sum(all_numbers) / len(all_numbers),
+                "first_10": all_numbers[:10],
+                "last_10": all_numbers[-10:]
+            }
+        return None
+    except Exception as e:
+        logger.error(f"CSV parse error: {e}")
+        return None
+
+def extract_values_from_html(content):
+    """Extract important values from HTML"""
+    try:
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        # Remove script and style
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        
+        values = {}
+        
+        # Extract from tags with IDs
+        for tag in soup.find_all(id=True):
+            tag_id = tag.get('id')
+            text = tag.get_text().strip()
+            if text and len(text) < 500:
+                values[f"#{tag_id}"] = text
+        
+        # Extract from common semantic tags
+        for tag_name in ['span', 'div', 'p', 'code', 'pre', 'strong', 'em']:
+            for tag in soup.find_all(tag_name):
+                text = tag.get_text().strip()
+                # Look for potential codes/secrets (alphanumeric strings)
+                if text and len(text) < 200:
+                    # If it looks like a code (no spaces, mix of letters/numbers)
+                    if text.replace('-', '').replace('_', '').isalnum() and len(text) > 3:
+                        class_name = ' '.join(tag.get('class', []))
+                        key = f"{tag_name}.{class_name}" if class_name else tag_name
+                        if key not in values:
+                            values[key] = text
+        
+        # Get clean text
+        text = soup.get_text()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        clean_text = '\n'.join(lines)
+        
+        return {
+            "values": values,
+            "text": clean_text,
+            "has_data": len(values) > 0
+        }
+    except Exception as e:
+        logger.error(f"HTML parse error: {e}")
+        return {"values": {}, "text": content[:2000], "has_data": False}
 
 def decode_base64_in_page(html_content):
     """Extract and decode base64 from page"""
@@ -70,65 +158,126 @@ def decode_base64_in_page(html_content):
     if match:
         try:
             decoded = base64.b64decode(match.group(1)).decode('utf-8')
+            logger.info(f"Decoded base64: {decoded[:200]}...")
             return decoded
         except:
             pass
     return html_content
 
 def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_attempts=None):
-    """Use Groq to solve the quiz"""
+    """Use Groq AI to solve the quiz"""
     if not groq_client:
         logger.error("Groq client not available!")
         return None
     
     files_context = ""
     if downloaded_files:
-        files_context = "\n\nDOWNLOADED DATA:\n"
+        files_context = "\n\n" + "="*60 + "\nDOWNLOADED/SCRAPED DATA:\n" + "="*60 + "\n"
+        
         for url, data in downloaded_files.items():
-            if data.get("success") and data.get("type") == "text":
+            if not data.get("success"):
+                continue
+            
+            if data.get("type") == "text":
                 content = data.get("content", "")
-                if len(content) > 8000:
-                    content = content[:8000] + "\n...(truncated)"
-                files_context += f"\n=== FROM: {url} ===\n{content}\n================\n"
+                
+                # Check if it's CSV
+                if 'csv' in url.lower() or 'csv' in data.get('content_type', '').lower():
+                    csv_data = parse_csv_content(content)
+                    if csv_data:
+                        files_context += f"\n📊 CSV FILE: {url}\n"
+                        files_context += f"   Total numbers found: {csv_data['count']}\n"
+                        files_context += f"   ✓ SUM OF ALL NUMBERS: {csv_data['sum']}\n"
+                        files_context += f"   MIN: {csv_data['min']}\n"
+                        files_context += f"   MAX: {csv_data['max']}\n"
+                        files_context += f"   AVERAGE: {csv_data['avg']:.2f}\n"
+                        files_context += f"   First 10 numbers: {csv_data['first_10']}\n"
+                        files_context += f"   Last 10 numbers: {csv_data['last_10']}\n"
+                    else:
+                        files_context += f"\n📄 FILE: {url}\n{content[:1500]}\n"
+                
+                # Check if it's HTML
+                elif 'html' in data.get('content_type', '').lower() or '<html' in content.lower():
+                    html_data = extract_values_from_html(content)
+                    files_context += f"\n🌐 HTML PAGE: {url}\n"
+                    
+                    if html_data['has_data'] and html_data['values']:
+                        files_context += "   ✓ EXTRACTED VALUES (potential secrets/codes):\n"
+                        for key, value in list(html_data['values'].items())[:20]:
+                            files_context += f"      {key}: '{value}'\n"
+                    
+                    files_context += f"\n   TEXT CONTENT:\n{html_data['text'][:1500]}\n"
+                
+                else:
+                    files_context += f"\n📄 FILE: {url}\n{content[:2000]}\n"
     
     context = ""
     if previous_attempts:
-        context = f"\nPREVIOUS WRONG ATTEMPTS:\n{json.dumps(previous_attempts[-1:], indent=2)}\nLearn from mistakes!\n"
+        last = previous_attempts[-1]
+        context = f"\n⚠️ PREVIOUS WRONG ATTEMPT:\n"
+        context += f"   Your answer: {last.get('answer')}\n"
+        context += f"   Why wrong: {last.get('reason')}\n"
+        context += f"   ➜ LEARN FROM THIS! Check the data above carefully.\n"
     
-    prompt = f"""Solve this data analysis quiz.
+    prompt = f"""You are solving a data analysis quiz. Be EXTREMELY PRECISE.
 
 QUIZ URL: {quiz_url}
 
 PAGE CONTENT:
-{page_content[:12000]}
+{page_content[:10000]}
 
 {files_context}
 
 {context}
 
-INSTRUCTIONS:
-1. Decode any base64 content (look for atob)
-2. Read the EXACT question being asked
-3. List files to download and URLs to scrape
-4. Use downloaded/scraped data to calculate answer
-5. For CSV SUM: add ALL numbers together (not max/min/first)
-6. For scraping: find ACTUAL value in HTML tags (not placeholder text)
+🎯 YOUR TASK:
+1. If page has base64 (atob), DECODE IT FIRST to see real question
+2. Read the exact question carefully
+3. Identify what files/URLs to download/scrape
+4. Use the PRE-CALCULATED data above (don't recalculate!)
+5. Find the exact answer
 
-Respond with ONLY valid JSON:
-{{"task": "exact question", "submit_url": "full URL", "file_urls": ["file1.csv"], "scrape_urls": ["/path/to/scrape"], "answer": <calculated answer>, "reasoning": "I decoded X, downloaded Y, calculated Z"}}
+📊 FOR CSV SUM QUESTIONS:
+- I've ALREADY calculated the sum for you above
+- Look for "✓ SUM OF ALL NUMBERS: X"
+- Use that EXACT number as your answer
+- DO NOT try to recalculate!
 
-CRITICAL RULES:
-- If question says "sum", add ALL numbers: 1+2+3 = 6
-- If question says "get secret from page", find actual value like <span id="code">ABC123</span>, answer is "ABC123"
-- Placeholder text like "your secret" is NOT the answer
-- If decoded text mentions scraping "/demo-data", add "/demo-data" to scrape_urls
-- Answer TYPE matters: sum=INTEGER, text=STRING, yes/no=BOOLEAN"""
+🔍 FOR SECRET/CODE QUESTIONS:
+- Look at "✓ EXTRACTED VALUES" section above
+- Find the actual secret/code value there
+- It will be in format like "#secret: 'ABC123'" or "span: 'XYZ789'"
+- The answer is the VALUE after the colon (e.g., 'ABC123')
+- NEVER use placeholder text like "your secret"
+
+📝 RESPOND WITH ONLY THIS JSON:
+{{
+  "task": "exact question from decoded content",
+  "submit_url": "full URL to POST answer to",
+  "file_urls": ["file1.csv"],
+  "scrape_urls": ["/path/to/scrape"],
+  "answer": <use the pre-calculated values from above>,
+  "reasoning": "I used the SUM/value shown above: X"
+}}
+
+⚡ CRITICAL RULES:
+- SUM questions: Use my pre-calculated "SUM OF ALL NUMBERS" value
+- SECRET questions: Use value from "EXTRACTED VALUES" (look for #id or tag names)
+- Answer TYPE: sum=INTEGER, secret=STRING, yes/no=BOOLEAN
+- If you see "✓ SUM OF ALL NUMBERS: 4803134", answer is 4803134 (integer)
+- If you see "#secret: 'mycode123'", answer is "mycode123" (string)"""
 
     try:
         response = groq_client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a data analysis expert. Respond with valid JSON only, no markdown."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": "You are a precise data analyst. Use the pre-calculated values provided. Be extremely accurate. Respond with valid JSON only."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
             ],
             model="llama-3.3-70b-versatile",
             temperature=0,
@@ -147,49 +296,52 @@ CRITICAL RULES:
         return result
     except Exception as e:
         logger.error(f"Groq error: {e}")
-        logger.error(f"Response text: {text if 'text' in locals() else 'N/A'}")
+        if 'text' in locals():
+            logger.error(f"Response: {text}")
         return None
 
 def process_quiz(start_url):
     """Process the quiz chain"""
-    logger.info(f"{'#'*60}")
-    logger.info(f"STARTING QUIZ: {start_url}")
-    logger.info(f"{'#'*60}")
+    logger.info(f"\n{'#'*70}")
+    logger.info(f"🚀 STARTING QUIZ: {start_url}")
+    logger.info(f"{'#'*70}\n")
     
     current_url = start_url
     results = []
     start_time = time.time()
     MAX_TIME = 170
     
-    for q in range(15):
-        if time.time() - start_time > MAX_TIME:
-            logger.warning("Time limit approaching, stopping")
+    for q in range(20):
+        elapsed = time.time() - start_time
+        if elapsed > MAX_TIME:
+            logger.warning(f"⏱️ Time limit approaching ({elapsed:.0f}s), stopping")
             break
         
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Question {q+1}: {current_url}")
-        logger.info(f"{'='*60}")
+        logger.info(f"\n{'='*70}")
+        logger.info(f"❓ Question {q+1}: {current_url}")
+        logger.info(f"{'='*70}")
         
         # Fetch page
         page = fetch_page_content(current_url)
         if not page['success']:
-            logger.error(f"Failed to fetch page")
+            logger.error(f"❌ Failed to fetch page")
             break
         
         # Decode base64
         content = decode_base64_in_page(page['content'])
-        logger.info(f"Page preview: {content[:300]}...")
+        logger.info(f"📄 Page preview: {content[:250]}...")
         
-        # Get solution
+        # Get initial solution
         solution = solve_with_groq(content, page['url'], None, results)
         if not solution:
-            logger.error("Failed to get solution from Groq")
+            logger.error("❌ Failed to get solution")
             break
         
-        logger.info(f"Task: {solution.get('task')}")
+        logger.info(f"📋 Task identified: {solution.get('task')}")
         
-        # Download files
+        # Download files and scrape URLs
         downloaded = {}
+        
         for file_url in solution.get("file_urls", []):
             if file_url:
                 data = download_file(file_url, page['url'])
@@ -197,7 +349,6 @@ def process_quiz(start_url):
                     downloaded[file_url] = data
                     logger.info(f"✓ Downloaded: {file_url}")
         
-        # Scrape URLs
         for scrape_url in solution.get("scrape_urls", []):
             if scrape_url:
                 if not scrape_url.startswith("http"):
@@ -210,26 +361,27 @@ def process_quiz(start_url):
                         "success": True,
                         "content": scraped_content,
                         "type": "text",
-                        "url": scrape_url
+                        "url": scrape_url,
+                        "content_type": "text/html"
                     }
                     logger.info(f"✓ Scraped: {scrape_url}")
         
         # Re-solve with downloaded data
         if downloaded:
-            logger.info(f"Re-solving with {len(downloaded)} resources")
+            logger.info(f"🔄 Re-analyzing with {len(downloaded)} resources...")
             solution = solve_with_groq(content, page["url"], downloaded, results)
             if not solution:
-                logger.error("Failed to solve with downloaded data")
+                logger.error("❌ Failed with downloaded data")
                 break
         
         answer = solution.get("answer")
-        logger.info(f"Answer: {answer} (type: {type(answer).__name__})")
-        logger.info(f"Reasoning: {solution.get('reasoning')}")
+        logger.info(f"💡 Answer: {answer} (type: {type(answer).__name__})")
+        logger.info(f"🧠 Reasoning: {solution.get('reasoning')}")
         
         # Get submit URL
         submit_url = solution.get("submit_url")
         if not submit_url:
-            logger.error("No submit URL found!")
+            logger.error("❌ No submit URL!")
             break
         
         if not submit_url.startswith("http"):
@@ -243,12 +395,12 @@ def process_quiz(start_url):
             "answer": answer
         }
         
-        logger.info(f"Submitting to: {submit_url}")
+        logger.info(f"📤 Submitting to: {submit_url}")
         
         try:
             resp = requests.post(submit_url, json=payload, timeout=30)
             data = resp.json()
-            logger.info(f"Response: {data}")
+            logger.info(f"📥 Response: {data}")
             
             correct = data.get("correct", False)
             reason = data.get("reason", "")
@@ -262,35 +414,38 @@ def process_quiz(start_url):
             })
             
             if correct:
-                logger.info("✓ CORRECT!")
+                logger.info(f"✅ CORRECT! Moving forward...")
                 next_url = data.get("url")
                 if next_url:
                     current_url = next_url
                     time.sleep(0.5)
                 else:
-                    logger.info("🎉 Quiz completed!")
+                    logger.info(f"\n🎉🎉🎉 QUIZ COMPLETED! 🎉🎉🎉")
                     break
             else:
-                logger.warning(f"✗ WRONG: {reason}")
+                logger.warning(f"❌ WRONG: {reason}")
                 next_url = data.get("url")
                 if next_url:
-                    logger.info("Moving to next question...")
+                    logger.info(f"➡️ Moving to next question anyway...")
                     current_url = next_url
                     time.sleep(0.5)
                 else:
-                    logger.warning("No next URL, ending quiz")
+                    logger.warning(f"🛑 No next URL, quiz ended")
                     break
         
         except Exception as e:
-            logger.error(f"Submit error: {e}")
+            logger.error(f"❌ Submit error: {e}")
             import traceback
             traceback.print_exc()
             break
     
     correct_count = sum(1 for r in results if r.get("correct"))
-    logger.info(f"\n{'='*60}")
-    logger.info(f"QUIZ COMPLETE: {correct_count}/{len(results)} correct")
-    logger.info(f"{'='*60}")
+    total = len(results)
+    percentage = (correct_count / total * 100) if total > 0 else 0
+    
+    logger.info(f"\n{'='*70}")
+    logger.info(f"📊 FINAL SCORE: {correct_count}/{total} correct ({percentage:.1f}%)")
+    logger.info(f"{'='*70}\n")
     
     return results
 
@@ -303,11 +458,11 @@ def quiz_endpoint():
         return jsonify({"error": "Invalid JSON"}), 400
     
     if data.get("secret") != SECRET:
-        logger.warning(f"Invalid secret attempt")
+        logger.warning(f"⚠️ Invalid secret attempt")
         return jsonify({"error": "Invalid secret"}), 403
     
     if data.get("email") != EMAIL:
-        logger.warning(f"Invalid email")
+        logger.warning(f"⚠️ Invalid email")
         return jsonify({"error": "Invalid email"}), 403
     
     url = data.get("url")
@@ -323,23 +478,25 @@ def quiz_endpoint():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
-    return jsonify({"status": "ok"}), 200
+    """Health check"""
+    return jsonify({"status": "ok", "service": "TDS Quiz Solver"}), 200
 
 @app.route('/test', methods=['GET'])
 def test():
-    """Test configuration endpoint"""
+    """Test configuration"""
     return jsonify({
         "email": EMAIL,
         "secret_set": bool(SECRET),
         "api_key_set": bool(GROQ_API_KEY),
-        "groq_ready": groq_client is not None
+        "groq_ready": groq_client is not None,
+        "status": "ready" if groq_client else "api_key_missing"
     }), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Starting server on port {port}")
-    logger.info(f"Email: {EMAIL}")
-    logger.info(f"Secret configured: {'Yes' if SECRET else 'No'}")
-    logger.info(f"Groq API key: {'Configured' if GROQ_API_KEY else 'MISSING'}")
+    logger.info(f"🚀 Starting TDS Quiz Solver on port {port}")
+    logger.info(f"📧 Email: {EMAIL}")
+    logger.info(f"🔑 Secret: {'*' * len(SECRET)}")
+    logger.info(f"🤖 Groq API: {'✓ Configured' if GROQ_API_KEY else '✗ MISSING'}")
+    logger.info(f"{'='*70}\n")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
