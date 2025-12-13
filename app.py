@@ -54,29 +54,63 @@ def fetch_page_content(url):
         logger.error(f"Fetch failed {url}: {e}")
         return {"content": "", "success": False, "error": str(e)}
 
-def fetch_page_with_js(url):
-    """Fetch page content with JavaScript rendering using requests-html"""
-    if not JS_RENDERING_AVAILABLE:
-        logger.warning("⚠️ JS rendering not available, falling back to regular fetch")
-        return fetch_page_content(url)
-    
+def fetch_and_parse_js_secret(page_url, page_content):
+    """Try to extract secret by fetching and parsing JavaScript files"""
     try:
-        session = HTMLSession()
-        response = session.get(url, timeout=30)
+        # Look for script tags
+        soup = BeautifulSoup(page_content, 'html.parser')
+        scripts = soup.find_all('script', src=True)
         
-        # Render JavaScript
-        logger.info("🔄 Rendering JavaScript...")
-        response.html.render(timeout=20, sleep=2)
+        for script in scripts:
+            script_url = script.get('src')
+            if script_url and not script_url.startswith('http'):
+                script_url = urljoin(page_url, script_url)
+            
+            logger.info(f"📜 Fetching JS file: {script_url}")
+            
+            try:
+                response = requests.get(script_url, timeout=10)
+                js_content = response.text
+                
+                # Look for common patterns where secrets might be set
+                # Pattern 1: textContent = "secret"
+                match = re.search(r'textContent\s*=\s*["\']([^"\']+)["\']', js_content)
+                if match:
+                    secret = match.group(1)
+                    logger.info(f"✓ Found secret in JS: {secret}")
+                    return secret
+                
+                # Pattern 2: innerHTML = "secret"
+                match = re.search(r'innerHTML\s*=\s*["\']([^"\']+)["\']', js_content)
+                if match:
+                    secret = match.group(1)
+                    logger.info(f"✓ Found secret in JS: {secret}")
+                    return secret
+                
+                # Pattern 3: document.getElementById(...).textContent = "secret"
+                match = re.search(r'getElementById.*?textContent\s*=\s*["\']([^"\']+)["\']', js_content)
+                if match:
+                    secret = match.group(1)
+                    logger.info(f"✓ Found secret in JS: {secret}")
+                    return secret
+                    
+                # Pattern 4: Look for any string that looks like a secret (alphanumeric, no spaces)
+                secrets = re.findall(r'["\']([A-Za-z0-9_-]{6,})["\']', js_content)
+                if secrets:
+                    # Return the first reasonable looking secret
+                    for s in secrets:
+                        if not any(keyword in s.lower() for keyword in ['question', 'secret', 'email', 'answer', 'submit', 'http', 'const', 'function']):
+                            logger.info(f"✓ Found potential secret in JS: {s}")
+                            return s
+                
+            except Exception as e:
+                logger.error(f"Failed to fetch/parse JS: {e}")
+                continue
         
-        content = response.html.html
-        session.close()
-        
-        logger.info(f"✓ Rendered JS page, length: {len(content)}")
-        return {"content": content, "success": True, "url": url}
+        return None
     except Exception as e:
-        logger.error(f"JS rendering failed {url}: {e}")
-        # Fallback to regular fetch
-        return fetch_page_content(url)
+        logger.error(f"JS parsing error: {e}")
+        return None
 
 def download_file(url, base_url=None):
     """Download a file"""
@@ -426,10 +460,17 @@ def process_quiz(start_url):
                 if not scrape_url.startswith("http"):
                     scrape_url = urljoin(page['url'], scrape_url)
                 
-                logger.info(f"🔍 Scraping with JS rendering: {scrape_url}")
-                scraped = fetch_page_with_js(scrape_url)  # Use JS rendering
+                logger.info(f"🔍 Scraping: {scrape_url}")
+                scraped = fetch_page_content(scrape_url)
                 if scraped["success"]:
                     scraped_content = decode_base64_in_page(scraped["content"])
+                    
+                    # Try to extract secret from JavaScript files
+                    js_secret = fetch_and_parse_js_secret(scrape_url, scraped["content"])
+                    if js_secret:
+                        # Add the secret to the scraped content so AI can see it
+                        scraped_content = f"SECRET FOUND: {js_secret}\n\n" + scraped_content
+                    
                     downloaded[scrape_url] = {
                         "success": True,
                         "content": scraped_content,
