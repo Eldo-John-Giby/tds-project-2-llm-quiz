@@ -74,7 +74,7 @@ def parse_csv_content(content):
             try:
                 csv_reader = csv.reader(StringIO(content), delimiter=delimiter)
                 rows = list(csv_reader)
-                if len(rows) > 0 and len(rows[0]) > 0:
+                if len(rows) > 0 and len(rows[0]) > 1:  # Must have multiple columns
                     break
             except:
                 continue
@@ -86,16 +86,18 @@ def parse_csv_content(content):
                 cell = cell.strip()
                 # Try to convert to number
                 try:
-                    num = float(cell.replace(',', ''))
+                    # Remove commas and convert
+                    num = float(cell.replace(',', '').replace(' ', ''))
                     all_numbers.append(num)
                 except:
                     pass
         
         if all_numbers:
+            total_sum = sum(all_numbers)
             return {
                 "numbers": all_numbers,
                 "count": len(all_numbers),
-                "sum": sum(all_numbers),
+                "sum": int(total_sum) if total_sum == int(total_sum) else total_sum,
                 "min": min(all_numbers),
                 "max": max(all_numbers),
                 "avg": sum(all_numbers) / len(all_numbers),
@@ -154,14 +156,23 @@ def extract_values_from_html(content):
 
 def decode_base64_in_page(html_content):
     """Extract and decode base64 from page"""
-    match = re.search(r'atob\([`\'"]([^`\'"]+)[`\'"]', html_content)
-    if match:
-        try:
-            decoded = base64.b64decode(match.group(1)).decode('utf-8')
-            logger.info(f"Decoded base64: {decoded[:200]}...")
-            return decoded
-        except:
-            pass
+    # Look for base64 in various patterns
+    patterns = [
+        r'atob\([`\'"]([^`\'"]+)[`\'"]',  # atob("...")
+        r'const code = `([A-Za-z0-9+/=]+)`',  # const code = `...`
+        r'code = ["\']([A-Za-z0-9+/=]+)["\']',  # code = "..."
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, html_content)
+        if match:
+            try:
+                decoded = base64.b64decode(match.group(1)).decode('utf-8')
+                logger.info(f"✓ Decoded base64: {decoded[:300]}...")
+                return decoded
+            except:
+                pass
+    
     return html_content
 
 def extract_origin_from_page(html_content, page_url):
@@ -239,7 +250,7 @@ PAGE CONTENT:
 {context}
 
 🎯 YOUR TASK:
-1. If page has base64 (atob), DECODE IT FIRST to see real question
+1. If page has base64 (atob OR const code = `...`), DECODE IT FIRST to see real question
 2. Read the exact question carefully
 3. Identify what files/URLs to download/scrape
 4. Use the PRE-CALCULATED data above (don't recalculate!)
@@ -248,15 +259,17 @@ PAGE CONTENT:
 📊 FOR CSV SUM QUESTIONS:
 - I've ALREADY calculated the sum for you above
 - Look for "✓ SUM OF ALL NUMBERS: X"
-- Use that EXACT number as your answer
+- Use that EXACT number as your answer (as INTEGER, not float)
 - DO NOT try to recalculate!
 
 🔍 FOR SECRET/CODE QUESTIONS:
-- Look at "✓ EXTRACTED VALUES" section above
+- Look at "✓ EXTRACTED VALUES" section above in the scraped data
+- The secret will be in the SCRAPED page content, not the main page
 - Find the actual secret/code value there
 - It will be in format like "#secret: 'ABC123'" or "span: 'XYZ789'"
 - The answer is the VALUE after the colon (e.g., 'ABC123')
-- NEVER use placeholder text like "your secret"
+- NEVER EVER use placeholder text like "your secret" - that's ALWAYS wrong!
+- If you don't see the scraped data, add the URL to scrape_urls
 
 🔗 FOR SUBMIT URL:
 - If you see "<span class=\"origin\"></span>/submit", just return "/submit" as the submit_url
@@ -274,12 +287,14 @@ PAGE CONTENT:
 }}
 
 ⚡ CRITICAL RULES:
-- SUM questions: Use my pre-calculated "SUM OF ALL NUMBERS" value
-- SECRET questions: Use value from "EXTRACTED VALUES" (look for #id or tag names)
-- Answer TYPE: sum=INTEGER, secret=STRING, yes/no=BOOLEAN
+- SUM questions: Use my pre-calculated "SUM OF ALL NUMBERS" value AS INTEGER
+- SECRET questions: Use ACTUAL value from "EXTRACTED VALUES", NEVER placeholders
+- Answer TYPE: sum=INTEGER (not float), secret=STRING, yes/no=BOOLEAN
 - submit_url: MUST start with / (like "/submit" or "/q1/submit"), NOT full URL
-- If you see "✓ SUM OF ALL NUMBERS: 4803134", answer is 4803134 (integer)
-- If you see "#secret: 'mycode123'", answer is "mycode123" (string)"""
+- If secret not found yet, add URL to scrape_urls to get it
+- If you see "✓ SUM OF ALL NUMBERS: 4803134.0", answer is 4803134 (integer)
+- If you see "#secret: 'mycode123'", answer is "mycode123" (string)
+- NEVER return placeholder values like "your secret", "your email", etc."""
 
     try:
         response = groq_client.chat.completions.create(
@@ -378,6 +393,7 @@ def process_quiz(start_url):
                 if not scrape_url.startswith("http"):
                     scrape_url = urljoin(page['url'], scrape_url)
                 
+                logger.info(f"🔍 Scraping: {scrape_url}")
                 scraped = fetch_page_content(scrape_url)
                 if scraped["success"]:
                     scraped_content = decode_base64_in_page(scraped["content"])
@@ -389,6 +405,7 @@ def process_quiz(start_url):
                         "content_type": "text/html"
                     }
                     logger.info(f"✓ Scraped: {scrape_url}")
+                    logger.info(f"   Preview: {scraped_content[:200]}...")
         
         # Re-solve with downloaded data
         if downloaded:
