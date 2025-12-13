@@ -14,7 +14,14 @@ from bs4 import BeautifulSoup
 import csv
 from io import StringIO
 
-# Try to import playwright
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+logger = logging.getLogger(__name__)
+
+# Try to import playwright AFTER logger is set up
 try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_AVAILABLE = True
@@ -22,13 +29,6 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     logger.warning("⚠️ Playwright not available - JS pages won't render")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
-)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
