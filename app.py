@@ -21,14 +21,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Try to import playwright AFTER logger is set up
+# Try to import requests-html for JS rendering
 try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
-    logger.info("✓ Playwright available for JS rendering")
+    from requests_html import HTMLSession
+    JS_RENDERING_AVAILABLE = True
+    logger.info("✓ requests-html available for JS rendering")
 except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-    logger.warning("⚠️ Playwright not available - JS pages won't render")
+    JS_RENDERING_AVAILABLE = False
+    logger.warning("⚠️ requests-html not available - JS pages won't render")
 
 app = Flask(__name__)
 
@@ -55,27 +55,26 @@ def fetch_page_content(url):
         return {"content": "", "success": False, "error": str(e)}
 
 def fetch_page_with_js(url):
-    """Fetch page content with JavaScript rendering using Playwright"""
-    if not PLAYWRIGHT_AVAILABLE:
-        logger.warning("⚠️ Playwright not available, falling back to regular fetch")
+    """Fetch page content with JavaScript rendering using requests-html"""
+    if not JS_RENDERING_AVAILABLE:
+        logger.warning("⚠️ JS rendering not available, falling back to regular fetch")
         return fetch_page_content(url)
     
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            
-            # Wait a bit for JS to execute
-            page.wait_for_timeout(2000)
-            
-            content = page.content()
-            browser.close()
-            
-            logger.info(f"✓ Rendered JS page, length: {len(content)}")
-            return {"content": content, "success": True, "url": url}
+        session = HTMLSession()
+        response = session.get(url, timeout=30)
+        
+        # Render JavaScript
+        logger.info("🔄 Rendering JavaScript...")
+        response.html.render(timeout=20, sleep=2)
+        
+        content = response.html.html
+        session.close()
+        
+        logger.info(f"✓ Rendered JS page, length: {len(content)}")
+        return {"content": content, "success": True, "url": url}
     except Exception as e:
-        logger.error(f"Playwright fetch failed {url}: {e}")
+        logger.error(f"JS rendering failed {url}: {e}")
         # Fallback to regular fetch
         return fetch_page_content(url)
 
