@@ -2,7 +2,7 @@ services:
   - type: web
     name: tds-project-quiz
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
     startCommand: gunicorn app:app
     envVars:
       - key: GROQ_API_KEY
