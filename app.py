@@ -63,17 +63,17 @@ def compute_email_number(email):
         logger.error(f"Failed to compute email number: {e}")
         return None
 
-def compute_secret_from_js(email):
+def compute_secret_from_email(email):
     """
     Compute the actual secret as the JavaScript does:
     SHA-1 hash of email, then take first 10 characters
+    This replicates: await sha1(email).then(hash => hash.substring(0, 10))
     """
     try:
-        # This replicates: sha1(email).then(hash => hash.substring(0, 10))
         hash_obj = hashlib.sha1(email.encode('utf-8'))
         full_hash = hash_obj.hexdigest()
         secret = full_hash[:10]
-        logger.info(f"🔐 Computed secret from email '{email}': {secret}")
+        logger.info(f"🔐 Computed SHA-1 secret from '{email}': {secret}")
         return secret
     except Exception as e:
         logger.error(f"Failed to compute secret: {e}")
@@ -81,66 +81,49 @@ def compute_secret_from_js(email):
 
 def fetch_and_parse_js_secret(page_url, page_content, email=None):
     """
-    Try to extract secret by analyzing JavaScript behavior
-    If we can't find it, compute it based on the email
+    Analyze JavaScript to determine what secret to use.
+    If JS uses emailNumber function, compute the SHA-1 based secret.
     """
     try:
-        soup = BeautifulSoup(page_content, 'html.parser')
-        scripts = soup.find_all('script', src=True)
+        # Check if the page uses emailNumber or sha1 functions
+        page_lower = page_content.lower()
+        uses_email_number = 'emailnumber' in page_lower
+        uses_sha1 = 'sha1' in page_lower
         
-        # Check if the page uses emailNumber function
-        page_text = page_content.lower()
-        uses_email_number = 'emailnumber' in page_text
+        logger.info(f"🔍 JS Analysis: emailNumber={uses_email_number}, sha1={uses_sha1}")
         
-        if uses_email_number and email:
-            # The pattern is: await sha1(email).then(hash => hash.substring(0, 10))
-            secret = compute_secret_from_js(email)
+        # If it uses emailNumber function with email parameter, compute SHA-1 secret
+        if (uses_email_number or uses_sha1) and email:
+            secret = compute_secret_from_email(email)
             if secret:
-                logger.info(f"✓ Computed secret using SHA-1: {secret}")
+                logger.info(f"✅ Using computed SHA-1 secret: {secret}")
                 return secret
         
-        # Otherwise try to parse from JS files (old method)
-        all_secrets = []
+        # Fallback: try to extract from JS files (legacy)
+        soup = BeautifulSoup(page_content, 'html.parser')
+        scripts = soup.find_all('script', src=True)
         
         for script in scripts:
             script_url = script.get('src')
             if script_url and not script_url.startswith('http'):
                 script_url = urljoin(page_url, script_url)
             
-            logger.info(f"📜 Fetching JS file: {script_url}")
+            logger.info(f"📜 Checking JS file: {script_url}")
             
             try:
                 response = requests.get(script_url, timeout=10)
                 js_content = response.text
                 
-                logger.info(f"📄 JS content preview: {js_content[:500]}")
-                
-                import_matches = re.findall(r'import.*?from\s+["\']([^"\']+)["\']', js_content)
-                for import_file in import_matches:
-                    if not import_file.startswith('http'):
-                        import_url = urljoin(script_url, import_file)
-                    else:
-                        import_url = import_file
-                    
-                    logger.info(f"📜 Following import: {import_url}")
-                    try:
-                        imp_response = requests.get(import_url, timeout=10)
-                        imp_content = imp_response.text
-                        logger.info(f"📄 Imported JS preview: {imp_content[:500]}")
-                    except Exception as e:
-                        logger.error(f"Failed to fetch import {import_url}: {e}")
+                # Check this file too
+                if 'emailnumber' in js_content.lower() and email:
+                    secret = compute_secret_from_email(email)
+                    if secret:
+                        return secret
                 
             except Exception as e:
-                logger.error(f"Failed to fetch/parse JS: {e}")
-                continue
+                logger.error(f"Failed to fetch JS: {e}")
         
-        # If we found emailNumber usage but couldn't compute, use email_number
-        if uses_email_number and email:
-            email_num = compute_email_number(email)
-            logger.info(f"✓ Fallback: using email_number as secret: {email_num}")
-            return str(email_num)
-        
-        logger.warning(f"⚠️ No secret found in JS files")
+        logger.warning(f"⚠️ Could not compute secret from JS")
         return None
         
     except Exception as e:
@@ -170,8 +153,8 @@ def download_file(url, base_url=None):
 
 def parse_csv_content(content, cutoff=None):
     """
-    Parse CSV and extract all numeric data with statistics
-    FIXED: Filter by numbers LESS THAN OR EQUAL TO cutoff (not greater than)
+    Parse CSV and extract all numeric data with statistics.
+    Try BOTH filtering approaches and report both.
     """
     try:
         for delimiter in [',', ';', '\t', '|']:
@@ -194,25 +177,37 @@ def parse_csv_content(content, cutoff=None):
                     pass
         
         if all_numbers:
-            # CRITICAL FIX: The cutoff means "sum numbers <= cutoff", not "> cutoff"
-            if cutoff is not None:
-                filtered_numbers = [n for n in all_numbers if n <= cutoff]
-                logger.info(f"📊 Filtering numbers <= {cutoff}: {len(all_numbers)} → {len(filtered_numbers)}")
-                all_numbers = filtered_numbers
-            
-            total_sum = sum(all_numbers)
-            return {
-                "numbers": all_numbers,
-                "count": len(all_numbers),
-                "sum": int(total_sum) if total_sum == int(total_sum) else total_sum,
-                "min": min(all_numbers) if all_numbers else 0,
-                "max": max(all_numbers) if all_numbers else 0,
-                "avg": sum(all_numbers) / len(all_numbers) if all_numbers else 0,
-                "first_10": all_numbers[:10],
-                "last_10": all_numbers[-10:],
-                "cutoff": cutoff,
-                "filter_explanation": f"Summed all numbers <= {cutoff}" if cutoff else "Summed all numbers"
+            result = {
+                "all_numbers": all_numbers,
+                "total_count": len(all_numbers),
+                "sum_all": int(sum(all_numbers)) if sum(all_numbers) == int(sum(all_numbers)) else sum(all_numbers),
             }
+            
+            # Calculate both possible interpretations
+            if cutoff is not None:
+                numbers_lte = [n for n in all_numbers if n <= cutoff]
+                numbers_gt = [n for n in all_numbers if n > cutoff]
+                
+                sum_lte = sum(numbers_lte)
+                sum_gt = sum(numbers_gt)
+                
+                result.update({
+                    "cutoff": cutoff,
+                    "numbers_lte_cutoff": numbers_lte,
+                    "count_lte": len(numbers_lte),
+                    "sum_lte": int(sum_lte) if sum_lte == int(sum_lte) else sum_lte,
+                    "numbers_gt_cutoff": numbers_gt,
+                    "count_gt": len(numbers_gt),
+                    "sum_gt": int(sum_gt) if sum_gt == int(sum_gt) else sum_gt,
+                })
+                
+                logger.info(f"📊 CSV Analysis:")
+                logger.info(f"   Total numbers: {len(all_numbers)}")
+                logger.info(f"   Sum of ALL: {result['sum_all']}")
+                logger.info(f"   Numbers <= {cutoff}: {len(numbers_lte)}, Sum: {result['sum_lte']}")
+                logger.info(f"   Numbers > {cutoff}: {len(numbers_gt)}, Sum: {result['sum_gt']}")
+            
+            return result
         return None
     except Exception as e:
         logger.error(f"CSV parse error: {e}")
@@ -305,14 +300,14 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
                     csv_data = parse_csv_content(content, cutoff=email_number)
                     if csv_data:
                         files_context += f"\n📊 CSV FILE: {url}\n"
-                        files_context += f"   {csv_data['filter_explanation']}\n"
-                        files_context += f"   Total numbers found: {csv_data['count']}\n"
-                        files_context += f"   ✓✓✓ ANSWER = SUM OF ALL NUMBERS: {csv_data['sum']} ✓✓✓\n"
-                        files_context += f"   MIN: {csv_data['min']}\n"
-                        files_context += f"   MAX: {csv_data['max']}\n"
-                        files_context += f"   AVERAGE: {csv_data['avg']:.2f}\n"
-                        files_context += f"   First 10 numbers: {csv_data['first_10']}\n"
-                        files_context += f"   Last 10 numbers: {csv_data['last_10']}\n"
+                        files_context += f"   Total numbers: {csv_data['total_count']}\n"
+                        files_context += f"   Sum of ALL numbers: {csv_data['sum_all']}\n"
+                        
+                        if csv_data.get('cutoff'):
+                            files_context += f"\n   WITH CUTOFF = {csv_data['cutoff']}:\n"
+                            files_context += f"   ├─ Numbers > cutoff: {csv_data['count_gt']} numbers, Sum = {csv_data['sum_gt']}\n"
+                            files_context += f"   └─ Numbers <= cutoff: {csv_data['count_lte']} numbers, Sum = {csv_data['sum_lte']}\n"
+                            files_context += f"\n   🎯 MOST LIKELY ANSWER: {csv_data['sum_gt']} (sum of numbers > cutoff)\n"
                     else:
                         files_context += f"\n📄 FILE: {url}\n{content[:1500]}\n"
                 
@@ -320,12 +315,18 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
                     html_data = extract_values_from_html(content)
                     files_context += f"\n🌐 HTML PAGE: {url}\n"
                     
+                    # Check for SECRET FOUND marker
+                    if 'SECRET FOUND:' in content:
+                        secret_match = re.search(r'SECRET FOUND:\s*([^\s\n]+)', content)
+                        if secret_match:
+                            files_context += f"   🔐 SECRET FOUND: {secret_match.group(1)}\n\n"
+                    
                     if html_data['has_data'] and html_data['values']:
-                        files_context += "   ✓ EXTRACTED VALUES (potential secrets/codes):\n"
+                        files_context += "   Extracted values:\n"
                         for key, value in list(html_data['values'].items())[:20]:
                             files_context += f"      {key}: '{value}'\n"
                     
-                    files_context += f"\n   TEXT CONTENT:\n{html_data['text'][:1500]}\n"
+                    files_context += f"\n   TEXT:\n{html_data['text'][:1000]}\n"
                 
                 else:
                     files_context += f"\n📄 FILE: {url}\n{content[:2000]}\n"
@@ -336,7 +337,10 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
         context = f"\n⚠️ PREVIOUS WRONG ATTEMPT:\n"
         context += f"   Your answer: {last.get('answer')}\n"
         context += f"   Why wrong: {last.get('reason')}\n"
-        context += f"   ➜ LEARN FROM THIS! The secret/answer you used was WRONG.\n"
+        if last.get('reason') == 'Wrong sum of numbers':
+            context += f"   ➜ Try the OTHER sum interpretation (> cutoff instead of <= cutoff, or vice versa)\n"
+        else:
+            context += f"   ➜ The secret/answer you used was WRONG. Look more carefully!\n"
     
     prompt = f"""You are solving a data analysis quiz. Be EXTREMELY PRECISE.
 
@@ -349,52 +353,38 @@ PAGE CONTENT:
 
 {context}
 
-🎯 YOUR TASK:
-1. If page has base64 (atob OR const code = `...`), DECODE IT FIRST to see real question
-2. Read the exact question carefully
-3. Identify what files/URLs to download/scrape
-4. Use the PRE-CALCULATED data above (don't recalculate!)
-5. Find the exact answer
+🎯 INSTRUCTIONS:
+1. Read the question carefully
+2. Look for "SECRET FOUND:" or "🎯 MOST LIKELY ANSWER:" in the data above
+3. Use those EXACT values as your answer
 
-📊 FOR CSV SUM QUESTIONS:
-- I've ALREADY calculated the sum for you above
-- Look for "✓✓✓ ANSWER = SUM OF ALL NUMBERS: X ✓✓✓"
-- Use that EXACT number as your answer (as INTEGER, not float)
-- DO NOT try to recalculate!
+📊 FOR CSV QUESTIONS:
+- The quiz shows "Cutoff: X" 
+- This usually means sum numbers GREATER THAN cutoff (not <=)
+- Look for "🎯 MOST LIKELY ANSWER: Y (sum of numbers > cutoff)"
+- Use that as your answer (as INTEGER)
 
-🔍 FOR SECRET/CODE QUESTIONS:
-- Look for "SECRET FOUND: XXXXX" at the TOP of scraped data
-- That's the REAL computed secret, not a template string
-- Use that EXACT value as your answer
-- NEVER use placeholder text like "your secret"
-- If you don't see "SECRET FOUND:", add the URL to scrape_urls
-
-🔗 FOR SUBMIT URL:
-- Always return just "/submit" as the submit_url
-- I will add the correct domain automatically
+🔍 FOR SECRET QUESTIONS:
+- Look for "🔐 SECRET FOUND: XXXXX" in scraped data
+- Use that EXACT value
+- If not found, add URL to scrape_urls
 
 📝 RESPOND WITH ONLY THIS JSON:
 {{
-  "task": "exact question from decoded content",
+  "task": "brief description",
   "submit_url": "/submit",
-  "file_urls": ["file1.csv"],
-  "scrape_urls": ["/path/to/scrape"],
-  "answer": <use the EXACT pre-calculated value>,
-  "reasoning": "I used [SECRET FOUND / SUM] value: X"
-}}
-
-⚡ CRITICAL RULES:
-- For SECRET: Use value after "SECRET FOUND:" (computed, not template)
-- For SUM: Use value after "✓✓✓ ANSWER = SUM OF ALL NUMBERS:"
-- Answer TYPE: sum=INTEGER, secret=STRING
-- NEVER return placeholder values"""
+  "file_urls": [],
+  "scrape_urls": [],
+  "answer": <EXACT value from above>,
+  "reasoning": "Used [SECRET FOUND / SUM] value: X"
+}}"""
 
     try:
         response = groq_client.chat.completions.create(
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a precise data analyst. Use the pre-calculated values provided. Be extremely accurate. Respond with valid JSON only."
+                    "content": "You extract exact values from provided data. Respond with valid JSON only."
                 },
                 {
                     "role": "user",
@@ -452,7 +442,7 @@ def process_quiz(start_url):
         logger.info(f"🌐 Origin: {origin}")
         logger.info(f"📄 Page preview: {content[:250]}...")
         
-        # Compute email_number BEFORE calling solve_with_groq
+        # Compute email_number and user_email
         email_number = None
         user_email = None
         if '?email=' in current_url:
@@ -460,17 +450,18 @@ def process_quiz(start_url):
             if email_match:
                 user_email = email_match.group(1).replace('%40', '@')
                 email_number = compute_email_number(user_email)
-                logger.info(f"📧 Computed email number from {user_email}: {email_number}")
+                logger.info(f"📧 User email: {user_email}")
+                logger.info(f"📧 Email number: {email_number}")
         
         solution = solve_with_groq(content, page['url'], None, results, email_number)
         if not solution:
             logger.error("❌ Failed to get solution")
             break
         
-        logger.info(f"📋 Task identified: {solution.get('task')}")
+        logger.info(f"📋 Task: {solution.get('task')}")
         
         submit_url = f"{origin}/submit"
-        logger.info(f"✓ Using submit URL: {submit_url}")
+        logger.info(f"✓ Submit URL: {submit_url}")
         
         downloaded = {}
         
@@ -491,12 +482,13 @@ def process_quiz(start_url):
                 if scraped["success"]:
                     scraped_content = decode_base64_in_page(scraped["content"])
                     
-                    # CRITICAL FIX: Compute the ACTUAL secret using SHA-1
+                    # COMPUTE the actual secret using the email
                     js_secret = fetch_and_parse_js_secret(scrape_url, scraped["content"], user_email)
                     
                     if js_secret:
-                        # Add the COMPUTED secret to the top so AI sees it immediately
+                        # Prepend the computed secret
                         scraped_content = f"SECRET FOUND: {js_secret}\n\n" + scraped_content
+                        logger.info(f"✅ Added SECRET FOUND: {js_secret} to scraped content")
                     
                     downloaded[scrape_url] = {
                         "success": True,
@@ -506,7 +498,6 @@ def process_quiz(start_url):
                         "content_type": "text/html"
                     }
                     logger.info(f"✓ Scraped: {scrape_url}")
-                    logger.info(f"   Preview: {scraped_content[:500]}...")
         
         if downloaded:
             logger.info(f"🔄 Re-analyzing with {len(downloaded)} resources...")
@@ -518,10 +509,6 @@ def process_quiz(start_url):
         answer = solution.get("answer")
         logger.info(f"💡 Answer: {answer} (type: {type(answer).__name__})")
         logger.info(f"🧠 Reasoning: {solution.get('reasoning')}")
-        
-        if not submit_url or not submit_url.startswith("http"):
-            logger.error(f"❌ Invalid submit URL: {submit_url}")
-            break
         
         payload = {
             "email": EMAIL,
@@ -536,20 +523,16 @@ def process_quiz(start_url):
             resp = requests.post(submit_url, json=payload, timeout=30)
             
             if not resp.text.strip():
-                logger.warning(f"⚠️ Empty response from server (status: {resp.status_code})")
-                logger.warning(f"🛑 Cannot proceed without response data")
+                logger.warning(f"⚠️ Empty response (status: {resp.status_code})")
                 break
             
-            logger.info(f"📥 Raw response ({resp.status_code}): {resp.text[:500]}")
+            logger.info(f"📥 Response ({resp.status_code}): {resp.text[:500]}")
             
             try:
                 data = resp.json()
             except json.JSONDecodeError as e:
-                logger.error(f"❌ Invalid JSON response: {e}")
-                logger.error(f"Response text: {resp.text[:1000]}")
+                logger.error(f"❌ Invalid JSON: {e}")
                 break
-            
-            logger.info(f"📥 Parsed response: {data}")
             
             correct = data.get("correct", False)
             reason = data.get("reason", "")
@@ -563,28 +546,25 @@ def process_quiz(start_url):
             })
             
             if correct:
-                logger.info(f"✅ CORRECT! Moving forward...")
+                logger.info(f"✅ CORRECT!")
                 next_url = data.get("url")
                 if next_url:
                     current_url = next_url
                     time.sleep(0.5)
                 else:
-                    logger.info(f"\n🎉🎉🎉 QUIZ COMPLETED! 🎉🎉🎉")
+                    logger.info(f"\n🎉 QUIZ COMPLETED! 🎉")
                     break
             else:
                 logger.warning(f"❌ WRONG: {reason}")
                 next_url = data.get("url")
                 if next_url:
-                    logger.info(f"➡️ Moving to next question anyway...")
+                    logger.info(f"➡️ Next question...")
                     current_url = next_url
                     time.sleep(0.5)
                 else:
-                    logger.warning(f"🛑 No next URL, quiz ended")
+                    logger.warning(f"🛑 Quiz ended")
                     break
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Network error during submission: {e}")
-            break
         except Exception as e:
             logger.error(f"❌ Submit error: {e}")
             import traceback
@@ -596,7 +576,7 @@ def process_quiz(start_url):
     percentage = (correct_count / total * 100) if total > 0 else 0
     
     logger.info(f"\n{'='*70}")
-    logger.info(f"📊 FINAL SCORE: {correct_count}/{total} correct ({percentage:.1f}%)")
+    logger.info(f"📊 FINAL: {correct_count}/{total} correct ({percentage:.1f}%)")
     logger.info(f"{'='*70}\n")
     
     return results
@@ -610,44 +590,36 @@ def quiz_endpoint():
         return jsonify({"error": "Invalid JSON"}), 400
     
     if data.get("secret") != SECRET:
-        logger.warning(f"⚠️ Invalid secret attempt")
         return jsonify({"error": "Invalid secret"}), 403
     
     if data.get("email") != EMAIL:
-        logger.warning(f"⚠️ Invalid email")
         return jsonify({"error": "Invalid email"}), 403
     
     url = data.get("url")
     if not url:
-        return jsonify({"error": "No URL provided"}), 400
+        return jsonify({"error": "No URL"}), 400
     
-    logger.info(f"✓ Received quiz request: {url}")
+    logger.info(f"✓ Quiz request: {url}")
     
     Thread(target=lambda: process_quiz(url), daemon=True).start()
     
-    return jsonify({"status": "accepted", "message": "Processing quiz"}), 200
+    return jsonify({"status": "accepted"}), 200
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check"""
-    return jsonify({"status": "ok", "service": "TDS Quiz Solver"}), 200
+    return jsonify({"status": "ok"}), 200
 
 @app.route('/test', methods=['GET'])
 def test():
-    """Test configuration"""
     return jsonify({
         "email": EMAIL,
-        "secret_set": bool(SECRET),
-        "api_key_set": bool(GROQ_API_KEY),
         "groq_ready": groq_client is not None,
-        "status": "ready" if groq_client else "api_key_missing"
+        "status": "ready" if groq_client else "no_api_key"
     }), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Starting TDS Quiz Solver on port {port}")
+    logger.info(f"🚀 Starting on port {port}")
     logger.info(f"📧 Email: {EMAIL}")
-    logger.info(f"🔑 Secret: {'*' * len(SECRET)}")
-    logger.info(f"🤖 Groq API: {'✓ Configured' if GROQ_API_KEY else '✗ MISSING'}")
-    logger.info(f"{'='*70}\n")
+    logger.info(f"🤖 Groq: {'✓' if GROQ_API_KEY else '✗'}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
