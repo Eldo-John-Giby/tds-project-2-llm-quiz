@@ -108,28 +108,27 @@ def fetch_and_parse_js_secret(page_url, page_content):
         logger.error(f"JS parsing error: {e}")
         return None
 
-def parse_js_for_secrets(js_content):
-    """Parse JS content for potential secrets"""
-    secrets = []
-    
-    # Look for ALL possible patterns
-    patterns = [
-        r'textContent\s*=\s*["\']([^"\']+)["\']',
-        r'innerHTML\s*=\s*["\']([^"\']+)["\']',
-        r'innerText\s*=\s*["\']([^"\']+)["\']',
-        r'return\s+["\']([A-Za-z0-9_-]{5,})["\']',
-        r':\s*["\']([A-Za-z0-9_-]{5,})["\']',
-        r'=\s*["\']([A-Za-z0-9_-]{5,})["\']',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, js_content, re.IGNORECASE)
-        for match in matches:
-            # Filter out common keywords
-            if len(match) >= 5 and not any(kw in match.lower() for kw in ['question', 'email', 'submit', 'http', 'const', 'function', 'document', 'element', 'window', 'import', 'export', 'please', 'provide', 'secret', 'strong', 'utils']):
-                secrets.append(match)
-    
-    return secrets
+def compute_email_number(email):
+    """Compute the emailNumber from an email address - converts email to a number"""
+    try:
+        # The emailNumber function likely converts email to a number
+        # Common patterns: sum of ASCII values, hash mod something, extract numbers
+        
+        # Pattern 1: Extract all digits from email
+        digits = ''.join(c for c in email if c.isdigit())
+        if digits:
+            number = int(digits)
+            logger.info(f"📧 Email number (digits): {number}")
+            return number
+        
+        # Pattern 2: Sum ASCII values
+        ascii_sum = sum(ord(c) for c in email)
+        logger.info(f"📧 Email number (ASCII sum): {ascii_sum}")
+        return ascii_sum
+        
+    except Exception as e:
+        logger.error(f"Failed to compute email number: {e}")
+        return None
 
 def download_file(url, base_url=None):
     """Download a file"""
@@ -152,7 +151,7 @@ def download_file(url, base_url=None):
         logger.error(f"Download failed: {e}")
         return {"success": False, "error": str(e), "url": url}
 
-def parse_csv_content(content):
+def parse_csv_content(content, cutoff=None):
     """Parse CSV and extract all numeric data with statistics"""
     try:
         # Try different delimiters
@@ -179,21 +178,51 @@ def parse_csv_content(content):
                     pass
         
         if all_numbers:
+            # Filter by cutoff if provided
+            if cutoff is not None:
+                filtered_numbers = [n for n in all_numbers if n > cutoff]
+                logger.info(f"📊 Filtering numbers > {cutoff}: {len(all_numbers)} → {len(filtered_numbers)}")
+                all_numbers = filtered_numbers
+            
             total_sum = sum(all_numbers)
             return {
                 "numbers": all_numbers,
                 "count": len(all_numbers),
                 "sum": int(total_sum) if total_sum == int(total_sum) else total_sum,
-                "min": min(all_numbers),
-                "max": max(all_numbers),
-                "avg": sum(all_numbers) / len(all_numbers),
+                "min": min(all_numbers) if all_numbers else 0,
+                "max": max(all_numbers) if all_numbers else 0,
+                "avg": sum(all_numbers) / len(all_numbers) if all_numbers else 0,
                 "first_10": all_numbers[:10],
-                "last_10": all_numbers[-10:]
+                "last_10": all_numbers[-10:],
+                "cutoff": cutoff
             }
         return None
     except Exception as e:
         logger.error(f"CSV parse error: {e}")
         return None
+
+def parse_js_for_secrets(js_content):
+    """Parse JS content for potential secrets"""
+    secrets = []
+    
+    # Look for ALL possible patterns
+    patterns = [
+        r'textContent\s*=\s*["\']([^"\']+)["\']',
+        r'innerHTML\s*=\s*["\']([^"\']+)["\']',
+        r'innerText\s*=\s*["\']([^"\']+)["\']',
+        r'return\s+["\']([A-Za-z0-9_-]{5,})["\']',
+        r':\s*["\']([A-Za-z0-9_-]{5,})["\']',
+        r'=\s*["\']([A-Za-z0-9_-]{5,})["\']',
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, js_content, re.IGNORECASE)
+        for match in matches:
+            # Filter out common keywords
+            if len(match) >= 5 and not any(kw in match.lower() for kw in ['question', 'email', 'submit', 'http', 'const', 'function', 'document', 'element', 'window', 'import', 'export', 'please', 'provide', 'secret', 'strong', 'utils']):
+                secrets.append(match)
+    
+    return secrets
 
 def extract_values_from_html(content):
     """Extract important values from HTML"""
@@ -288,10 +317,12 @@ def solve_with_groq(page_content, quiz_url, downloaded_files=None, previous_atte
                 
                 # Check if it's CSV
                 if 'csv' in url.lower() or 'csv' in data.get('content_type', '').lower():
-                    csv_data = parse_csv_content(content)
+                    csv_data = parse_csv_content(content, cutoff=email_number)
                     if csv_data:
                         files_context += f"\n📊 CSV FILE: {url}\n"
                         files_context += f"   Total numbers found: {csv_data['count']}\n"
+                        if csv_data.get('cutoff'):
+                            files_context += f"   ✓ CUTOFF: {csv_data['cutoff']} (only counting numbers above this)\n"
                         files_context += f"   ✓ SUM OF ALL NUMBERS: {csv_data['sum']}\n"
                         files_context += f"   MIN: {csv_data['min']}\n"
                         files_context += f"   MAX: {csv_data['max']}\n"
@@ -466,6 +497,15 @@ def process_quiz(start_url):
         
         # Download files and scrape URLs
         downloaded = {}
+        email_number = None
+        
+        # Extract email from current URL if present
+        if '?email=' in current_url:
+            email_match = re.search(r'email=([^&]+)', current_url)
+            if email_match:
+                user_email = email_match.group(1).replace('%40', '@')
+                email_number = compute_email_number(user_email)
+                logger.info(f"📧 Computed email number from {user_email}: {email_number}")
         
         for file_url in solution.get("file_urls", []):
             if file_url:
@@ -486,6 +526,12 @@ def process_quiz(start_url):
                     
                     # Try to extract secret from JavaScript files
                     js_secret = fetch_and_parse_js_secret(scrape_url, scraped["content"])
+                    
+                    # If no secret found but we have email_number, use that as the secret
+                    if not js_secret and email_number:
+                        js_secret = str(email_number)
+                        logger.info(f"✓ Using email_number as secret: {js_secret}")
+                    
                     if js_secret:
                         # Add the secret to the scraped content so AI can see it
                         scraped_content = f"SECRET FOUND: {js_secret}\n\n" + scraped_content
