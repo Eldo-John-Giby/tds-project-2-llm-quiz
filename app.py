@@ -21,15 +21,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Try to import requests-html for JS rendering
-try:
-    from requests_html import HTMLSession
-    JS_RENDERING_AVAILABLE = True
-    logger.info("✓ requests-html available for JS rendering")
-except ImportError:
-    JS_RENDERING_AVAILABLE = False
-    logger.warning("⚠️ requests-html not available - JS pages won't render")
-
 app = Flask(__name__)
 
 EMAIL = "24f2005903@ds.study.iitm.ac.in"
@@ -72,36 +63,38 @@ def fetch_and_parse_js_secret(page_url, page_content):
                 response = requests.get(script_url, timeout=10)
                 js_content = response.text
                 
-                # Look for common patterns where secrets might be set
-                # Pattern 1: textContent = "secret"
-                match = re.search(r'textContent\s*=\s*["\']([^"\']+)["\']', js_content)
+                logger.info(f"📄 JS content preview: {js_content[:500]}")
+                
+                # Look for ALL possible patterns
+                patterns = [
+                    r'textContent\s*=\s*["\']([^"\']+)["\']',
+                    r'innerHTML\s*=\s*["\']([^"\']+)["\']',
+                    r'innerText\s*=\s*["\']([^"\']+)["\']',
+                    r'\.text\s*=\s*["\']([^"\']+)["\']',
+                    r'secret["\']?\s*[=:]\s*["\']([^"\']+)["\']',
+                    r'answer["\']?\s*[=:]\s*["\']([^"\']+)["\']',
+                    r'code["\']?\s*[=:]\s*["\']([^"\']+)["\']',
+                    r'value["\']?\s*[=:]\s*["\']([^"\']+)["\']',
+                ]
+                
+                for pattern in patterns:
+                    matches = re.findall(pattern, js_content, re.IGNORECASE)
+                    if matches:
+                        for match in matches:
+                            # Filter out common keywords
+                            if len(match) > 3 and not any(kw in match.lower() for kw in ['question', 'email', 'submit', 'http', 'const', 'function', 'document', 'element', 'window', 'import', 'export']):
+                                logger.info(f"✓ Found secret in JS: {match}")
+                                return match
+                
+                # If no pattern matched, look for the actual secret element ID
+                # The page has <div id="question"></div>, so look for what gets put there
+                match = re.search(r'getElementById\s*\(\s*["\']question["\']\s*\).*?["\']([^"\']{5,})["\']', js_content, re.DOTALL)
                 if match:
                     secret = match.group(1)
-                    logger.info(f"✓ Found secret in JS: {secret}")
+                    logger.info(f"✓ Found secret via getElementById: {secret}")
                     return secret
                 
-                # Pattern 2: innerHTML = "secret"
-                match = re.search(r'innerHTML\s*=\s*["\']([^"\']+)["\']', js_content)
-                if match:
-                    secret = match.group(1)
-                    logger.info(f"✓ Found secret in JS: {secret}")
-                    return secret
-                
-                # Pattern 3: document.getElementById(...).textContent = "secret"
-                match = re.search(r'getElementById.*?textContent\s*=\s*["\']([^"\']+)["\']', js_content)
-                if match:
-                    secret = match.group(1)
-                    logger.info(f"✓ Found secret in JS: {secret}")
-                    return secret
-                    
-                # Pattern 4: Look for any string that looks like a secret (alphanumeric, no spaces)
-                secrets = re.findall(r'["\']([A-Za-z0-9_-]{6,})["\']', js_content)
-                if secrets:
-                    # Return the first reasonable looking secret
-                    for s in secrets:
-                        if not any(keyword in s.lower() for keyword in ['question', 'secret', 'email', 'answer', 'submit', 'http', 'const', 'function']):
-                            logger.info(f"✓ Found potential secret in JS: {s}")
-                            return s
+                logger.warning(f"⚠️ No secret pattern matched in JS file")
                 
             except Exception as e:
                 logger.error(f"Failed to fetch/parse JS: {e}")
