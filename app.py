@@ -52,6 +52,8 @@ def fetch_and_parse_js_secret(page_url, page_content):
         soup = BeautifulSoup(page_content, 'html.parser')
         scripts = soup.find_all('script', src=True)
         
+        all_secrets = []
+        
         for script in scripts:
             script_url = script.get('src')
             if script_url and not script_url.startswith('http'):
@@ -65,45 +67,69 @@ def fetch_and_parse_js_secret(page_url, page_content):
                 
                 logger.info(f"📄 JS content preview: {js_content[:500]}")
                 
-                # Look for ALL possible patterns
-                patterns = [
-                    r'textContent\s*=\s*["\']([^"\']+)["\']',
-                    r'innerHTML\s*=\s*["\']([^"\']+)["\']',
-                    r'innerText\s*=\s*["\']([^"\']+)["\']',
-                    r'\.text\s*=\s*["\']([^"\']+)["\']',
-                    r'secret["\']?\s*[=:]\s*["\']([^"\']+)["\']',
-                    r'answer["\']?\s*[=:]\s*["\']([^"\']+)["\']',
-                    r'code["\']?\s*[=:]\s*["\']([^"\']+)["\']',
-                    r'value["\']?\s*[=:]\s*["\']([^"\']+)["\']',
-                ]
+                # Check if this JS imports other files
+                import_matches = re.findall(r'import.*?from\s+["\']([^"\']+)["\']', js_content)
+                for import_file in import_matches:
+                    if not import_file.startswith('http'):
+                        import_url = urljoin(script_url, import_file)
+                    else:
+                        import_url = import_file
+                    
+                    logger.info(f"📜 Following import: {import_url}")
+                    try:
+                        imp_response = requests.get(import_url, timeout=10)
+                        imp_content = imp_response.text
+                        logger.info(f"📄 Imported JS preview: {imp_content[:500]}")
+                        
+                        # Parse the imported file for secrets
+                        secrets = parse_js_for_secrets(imp_content)
+                        all_secrets.extend(secrets)
+                    except Exception as e:
+                        logger.error(f"Failed to fetch import {import_url}: {e}")
                 
-                for pattern in patterns:
-                    matches = re.findall(pattern, js_content, re.IGNORECASE)
-                    if matches:
-                        for match in matches:
-                            # Filter out common keywords
-                            if len(match) > 3 and not any(kw in match.lower() for kw in ['question', 'email', 'submit', 'http', 'const', 'function', 'document', 'element', 'window', 'import', 'export']):
-                                logger.info(f"✓ Found secret in JS: {match}")
-                                return match
-                
-                # If no pattern matched, look for the actual secret element ID
-                # The page has <div id="question"></div>, so look for what gets put there
-                match = re.search(r'getElementById\s*\(\s*["\']question["\']\s*\).*?["\']([^"\']{5,})["\']', js_content, re.DOTALL)
-                if match:
-                    secret = match.group(1)
-                    logger.info(f"✓ Found secret via getElementById: {secret}")
-                    return secret
-                
-                logger.warning(f"⚠️ No secret pattern matched in JS file")
+                # Parse main JS file
+                secrets = parse_js_for_secrets(js_content)
+                all_secrets.extend(secrets)
                 
             except Exception as e:
                 logger.error(f"Failed to fetch/parse JS: {e}")
                 continue
         
+        # Return the first valid secret found
+        if all_secrets:
+            secret = all_secrets[0]
+            logger.info(f"✓ Found secret: {secret}")
+            return secret
+        
+        logger.warning(f"⚠️ No secret found in any JS files")
         return None
+        
     except Exception as e:
         logger.error(f"JS parsing error: {e}")
         return None
+
+def parse_js_for_secrets(js_content):
+    """Parse JS content for potential secrets"""
+    secrets = []
+    
+    # Look for ALL possible patterns
+    patterns = [
+        r'textContent\s*=\s*["\']([^"\']+)["\']',
+        r'innerHTML\s*=\s*["\']([^"\']+)["\']',
+        r'innerText\s*=\s*["\']([^"\']+)["\']',
+        r'return\s+["\']([A-Za-z0-9_-]{5,})["\']',
+        r':\s*["\']([A-Za-z0-9_-]{5,})["\']',
+        r'=\s*["\']([A-Za-z0-9_-]{5,})["\']',
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, js_content, re.IGNORECASE)
+        for match in matches:
+            # Filter out common keywords
+            if len(match) >= 5 and not any(kw in match.lower() for kw in ['question', 'email', 'submit', 'http', 'const', 'function', 'document', 'element', 'window', 'import', 'export', 'please', 'provide', 'secret', 'strong', 'utils']):
+                secrets.append(match)
+    
+    return secrets
 
 def download_file(url, base_url=None):
     """Download a file"""
