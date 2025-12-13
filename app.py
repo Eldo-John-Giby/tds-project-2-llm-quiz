@@ -399,8 +399,24 @@ def process_quiz(start_url):
         
         try:
             resp = requests.post(submit_url, json=payload, timeout=30)
-            data = resp.json()
-            logger.info(f"📥 Response: {data}")
+            
+            # Check if response has content before parsing JSON
+            if not resp.text.strip():
+                logger.warning(f"⚠️ Empty response from server (status: {resp.status_code})")
+                logger.warning(f"🛑 Cannot proceed without response data")
+                break
+            
+            # Log raw response for debugging
+            logger.info(f"📥 Raw response ({resp.status_code}): {resp.text[:500]}")
+            
+            try:
+                data = resp.json()
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Invalid JSON response: {e}")
+                logger.error(f"Response text: {resp.text[:1000]}")
+                break
+            
+            logger.info(f"📥 Parsed response: {data}")
             
             correct = data.get("correct", False)
             reason = data.get("reason", "")
@@ -433,6 +449,9 @@ def process_quiz(start_url):
                     logger.warning(f"🛑 No next URL, quiz ended")
                     break
         
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Network error during submission: {e}")
+            break
         except Exception as e:
             logger.error(f"❌ Submit error: {e}")
             import traceback
