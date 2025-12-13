@@ -14,6 +14,15 @@ from bs4 import BeautifulSoup
 import csv
 from io import StringIO
 
+# Try to import playwright
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+    logger.info("✓ Playwright available for JS rendering")
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    logger.warning("⚠️ Playwright not available - JS pages won't render")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -44,6 +53,31 @@ def fetch_page_content(url):
     except Exception as e:
         logger.error(f"Fetch failed {url}: {e}")
         return {"content": "", "success": False, "error": str(e)}
+
+def fetch_page_with_js(url):
+    """Fetch page content with JavaScript rendering using Playwright"""
+    if not PLAYWRIGHT_AVAILABLE:
+        logger.warning("⚠️ Playwright not available, falling back to regular fetch")
+        return fetch_page_content(url)
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            # Wait a bit for JS to execute
+            page.wait_for_timeout(2000)
+            
+            content = page.content()
+            browser.close()
+            
+            logger.info(f"✓ Rendered JS page, length: {len(content)}")
+            return {"content": content, "success": True, "url": url}
+    except Exception as e:
+        logger.error(f"Playwright fetch failed {url}: {e}")
+        # Fallback to regular fetch
+        return fetch_page_content(url)
 
 def download_file(url, base_url=None):
     """Download a file"""
@@ -393,8 +427,8 @@ def process_quiz(start_url):
                 if not scrape_url.startswith("http"):
                     scrape_url = urljoin(page['url'], scrape_url)
                 
-                logger.info(f"🔍 Scraping: {scrape_url}")
-                scraped = fetch_page_content(scrape_url)
+                logger.info(f"🔍 Scraping with JS rendering: {scrape_url}")
+                scraped = fetch_page_with_js(scrape_url)  # Use JS rendering
                 if scraped["success"]:
                     scraped_content = decode_base64_in_page(scraped["content"])
                     downloaded[scrape_url] = {
@@ -405,7 +439,7 @@ def process_quiz(start_url):
                         "content_type": "text/html"
                     }
                     logger.info(f"✓ Scraped: {scrape_url}")
-                    logger.info(f"   Preview: {scraped_content[:200]}...")
+                    logger.info(f"   Preview: {scraped_content[:500]}...")
         
         # Re-solve with downloaded data
         if downloaded:
